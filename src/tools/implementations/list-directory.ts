@@ -86,7 +86,7 @@ export function createListDirectoryTool(workDir: string): Tool {
           };
         }
 
-        const lines = listDir(absDir, absDir, 0, maxDepth);
+        const lines = listDir(absDir, workDir, 0, maxDepth);
 
         if (lines.length === 0) {
           return {

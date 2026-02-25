@@ -6,6 +6,7 @@ import { join } from 'path';
 import { SessionStore } from '../../src/session/session-store.js';
 import { RunManager } from '../../src/agent/run-manager.js';
 import { StateSnapshotManager } from '../../src/api/snapshot/state-snapshot-manager.js';
+import { SSEStreamManager } from '../../src/api/sse/sse-stream.js';
 import type { AgentRequest } from '../../src/types/run.js';
 
 // Feature: nodejs-claude-code, Property 58: 状态快照完整性
@@ -47,7 +48,7 @@ describe('Property 58: 状态快照完整性', () => {
           tempDirs.push(workDir);
           const sessionStore = new SessionStore(workDir);
           const runManager = new RunManager();
-          const snapshotManager = new StateSnapshotManager(sessionStore, runManager);
+          const snapshotManager = new StateSnapshotManager(sessionStore, runManager, new SSEStreamManager());
 
           // Create and save some sessions
           for (let i = 0; i < numSessions; i++) {
@@ -77,7 +78,7 @@ describe('Property 58: 状态快照完整性', () => {
           tempDirs.push(workDir);
           const sessionStore = new SessionStore(workDir);
           const runManager = new RunManager();
-          const snapshotManager = new StateSnapshotManager(sessionStore, runManager);
+          const snapshotManager = new StateSnapshotManager(sessionStore, runManager, new SSEStreamManager());
 
           const session = sessionStore.create();
           await sessionStore.save(session);
@@ -126,7 +127,7 @@ describe('Property 58: 状态快照完整性', () => {
           tempDirs.push(workDir);
           const sessionStore = new SessionStore(workDir);
           const runManager = new RunManager();
-          const snapshotManager = new StateSnapshotManager(sessionStore, runManager);
+          const snapshotManager = new StateSnapshotManager(sessionStore, runManager, new SSEStreamManager());
 
           const session = sessionStore.create();
           await sessionStore.save(session);
@@ -177,7 +178,7 @@ describe('Property 58: 状态快照完整性', () => {
           tempDirs.push(workDir);
           const sessionStore = new SessionStore(workDir);
           const runManager = new RunManager();
-          const snapshotManager = new StateSnapshotManager(sessionStore, runManager);
+          const snapshotManager = new StateSnapshotManager(sessionStore, runManager, new SSEStreamManager());
 
           const sessionIds: string[] = [];
           for (let i = 0; i < numSessions; i++) {

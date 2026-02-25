@@ -66,14 +66,8 @@ export class REPL {
     }
 
     if (input === '/clear') {
-      // Access conversationManager via the orchestrator's public interface if available,
-      // otherwise just print a message.
-      const orch = this.orchestrator as unknown as {
-        conversationManager?: { clear(): void };
-      };
-      if (orch.conversationManager && typeof orch.conversationManager.clear === 'function') {
-        orch.conversationManager.clear();
-      }
+      // Use the public clearConversation() method (P1-6 fix — no more unsafe casting)
+      this.orchestrator.clearConversation();
       console.log('Conversation cleared.');
       this.rl?.prompt();
       return;

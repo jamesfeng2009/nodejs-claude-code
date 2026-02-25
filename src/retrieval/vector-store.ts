@@ -87,6 +87,10 @@ export class VectorStore {
   /** Get direct dependencies of a file. */
   getDependencies(filePath: string): string[] {
     if (!this.dependencyGraph) return [];
+    // Support both class instances (with getDependencies method) and plain objects
+    if (typeof this.dependencyGraph.getDependencies === 'function') {
+      return this.dependencyGraph.getDependencies(filePath);
+    }
     return this.dependencyGraph.adjacencyList.get(filePath) ?? [];
   }
 

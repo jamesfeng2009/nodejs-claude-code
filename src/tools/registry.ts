@@ -63,27 +63,7 @@ export class ToolRegistry {
       return { valid: false, errors: ['Arguments must be an object'] };
     }
 
-    const argsObj = args as Record<string, unknown>;
-
-    // Check required fields
-    if (schema.required) {
-      for (const req of schema.required) {
-        if (!(req in argsObj)) {
-          errors.push(`Missing required argument: ${req}`);
-        }
-      }
-    }
-
-    // Check property types
-    for (const [key, value] of Object.entries(argsObj)) {
-      const propSchema = schema.properties[key];
-      if (!propSchema) {
-        // Extra properties are allowed unless additionalProperties is false
-        continue;
-      }
-      const typeError = validateType(value, propSchema.type, key);
-      if (typeError) errors.push(typeError);
-    }
+    validateObject(args as Record<string, unknown>, schema.properties, schema.required, '', errors);
 
     return { valid: errors.length === 0, errors };
   }
@@ -154,6 +134,82 @@ export class ToolRegistry {
 
   getAll(): Tool[] {
     return Array.from(this.tools.values());
+  }
+}
+
+function validateObject(
+  obj: Record<string, unknown>,
+  properties: Record<string, import('../types/tools.js').JSONSchemaProperty>,
+  required: string[] | undefined,
+  prefix: string,
+  errors: string[],
+): void {
+  const path = (key: string) => (prefix ? `${prefix}.${key}` : key);
+
+  // Check required fields
+  if (required) {
+    for (const req of required) {
+      if (!(req in obj)) {
+        errors.push(`Missing required argument: ${path(req)}`);
+      }
+    }
+  }
+
+  // Validate each provided property
+  for (const [key, value] of Object.entries(obj)) {
+    const propSchema = properties[key];
+    if (!propSchema) {
+      // additionalProperties is not defined on the top-level parameters schema,
+      // but individual nested object schemas may set it to false.
+      continue;
+    }
+    validateValue(value, propSchema, path(key), errors);
+  }
+}
+
+function validateValue(
+  value: unknown,
+  schema: import('../types/tools.js').JSONSchemaProperty,
+  path: string,
+  errors: string[],
+): void {
+  // Type check
+  const typeError = validateType(value, schema.type, path);
+  if (typeError) {
+    errors.push(typeError);
+    return; // No point doing deeper checks if the type is wrong
+  }
+
+  // Enum check
+  if (schema.enum && schema.enum.length > 0) {
+    if (!schema.enum.includes(value as string)) {
+      errors.push(`Argument '${path}' must be one of: ${schema.enum.join(', ')}`);
+    }
+  }
+
+  // Nested object validation
+  if (schema.type === 'object' && typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const nested = value as Record<string, unknown>;
+
+    // additionalProperties: false — reject unknown keys
+    if (schema.additionalProperties === false && schema.properties) {
+      for (const key of Object.keys(nested)) {
+        if (!(key in schema.properties)) {
+          errors.push(`Argument '${path}' has unexpected property: ${key}`);
+        }
+      }
+    }
+
+    if (schema.properties) {
+      validateObject(nested, schema.properties, schema.required, path, errors);
+    }
+  }
+
+  // Array item validation
+  if (schema.type === 'array' && Array.isArray(value) && schema.items) {
+    for (let i = 0; i < value.length; i++) {
+      validateValue(value[i], schema.items, `${path}[${i}]`, errors);
+    }
   }
 }
 

@@ -11,6 +11,8 @@ export class IdempotencyStore {
   private readonly ttlMs: number;
   private readonly completed = new Map<string, IdempotencyRecord>();
   private readonly inFlight = new Set<string>();
+  /** Maps idempotency key → runId for in-flight requests (P0-6 fix) */
+  private readonly inFlightRunIds = new Map<string, string>();
 
   constructor(ttlMs: number = DEFAULT_TTL_MS) {
     this.ttlMs = ttlMs;
@@ -34,6 +36,23 @@ export class IdempotencyStore {
     return { status: 'new' };
   }
 
+  /**
+   * Associate a runId with an in-flight idempotency key.
+   * Allows clients retrying an in-flight request to get the runId for SSE subscription.
+   * Fixes P0-6: in_flight response now includes runId.
+   */
+  setRunId(key: string, runId: string): void {
+    this.inFlightRunIds.set(key, runId);
+  }
+
+  /**
+   * Get the runId associated with an in-flight idempotency key.
+   * Returns undefined if not found.
+   */
+  getRunId(key: string): string | undefined {
+    return this.inFlightRunIds.get(key);
+  }
+
   complete(key: string, result: unknown): void {
     const now = Date.now();
     const record: IdempotencyRecord = {
@@ -47,10 +66,12 @@ export class IdempotencyStore {
     };
     this.completed.set(key, record);
     this.inFlight.delete(key);
+    this.inFlightRunIds.delete(key);
   }
 
   fail(key: string): void {
     this.inFlight.delete(key);
+    this.inFlightRunIds.delete(key);
   }
 
   cleanExpired(): void {

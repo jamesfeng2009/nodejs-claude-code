@@ -1,9 +1,17 @@
 import { randomUUID } from 'crypto';
 import type { Run, RunStatus, AgentRequest } from '../types/run.js';
 
+export type RunHandler = (run: Run) => Promise<void>;
+
 export class RunManager {
   /** runId → Run */
   private readonly runs = new Map<string, Run>();
+
+  /** Per-session serial queue: sessionId → promise chain */
+  private readonly sessionQueues = new Map<string, Promise<void>>();
+
+  /** Handler injected by the server to do actual run processing */
+  private handler: RunHandler | null = null;
 
   /**
    * Submit a new Run for the given session.
@@ -20,6 +28,14 @@ export class RunManager {
     };
     this.runs.set(run.runId, run);
     return run;
+  }
+
+  /**
+   * Inject the handler that will be called for each run.
+   * Must be set before processQueue is called with real work.
+   */
+  setHandler(handler: RunHandler): void {
+    this.handler = handler;
   }
 
   /**
@@ -81,9 +97,49 @@ export class RunManager {
   }
 
   /**
+   * Enqueue a run for serial execution within its session.
+   * Each session has its own promise chain so runs within a session are
+   * processed one at a time (Requirement 12.5), while different sessions
+   * can run concurrently.
+   *
+   * If no handler has been set, runs are immediately marked completed
+   * (placeholder behaviour used by unit tests).
+   */
+  enqueueRun(run: Run): void {
+    const sessionId = run.sessionId;
+    const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+
+    const next = prev.then(async () => {
+      this.transitionState(run.runId, 'running');
+      try {
+        if (this.handler) {
+          await this.handler(run);
+        }
+        // Only transition to completed if still running (handler may have
+        // already transitioned it, e.g. on error path)
+        const current = this.runs.get(run.runId);
+        if (current?.status === 'running') {
+          this.transitionState(run.runId, 'completed');
+        }
+      } catch (err) {
+        run.error = err instanceof Error ? err.message : String(err);
+        const current = this.runs.get(run.runId);
+        if (current?.status === 'running') {
+          this.transitionState(run.runId, 'failed');
+        }
+      }
+    });
+
+    this.sessionQueues.set(sessionId, next.catch(() => {}));
+  }
+
+  /**
    * Process all pending Runs for a session serially (one at a time).
    * Each Run is transitioned: pending → running → completed.
    * Requirement 12.5
+   *
+   * Note: for new submissions prefer enqueueRun() which chains onto the
+   * existing session queue. processQueue() is kept for batch/test use.
    */
   async processQueue(sessionId: string): Promise<void> {
     const pending = this.getRunsBySession(sessionId).filter(
@@ -93,13 +149,21 @@ export class RunManager {
     for (const run of pending) {
       this.transitionState(run.runId, 'running');
       try {
-        // Placeholder: real work would be injected via a handler callback.
-        // For now, immediately mark as completed.
-        await Promise.resolve();
-        this.transitionState(run.runId, 'completed');
+        if (this.handler) {
+          await this.handler(run);
+        } else {
+          await Promise.resolve();
+        }
+        const current = this.runs.get(run.runId);
+        if (current?.status === 'running') {
+          this.transitionState(run.runId, 'completed');
+        }
       } catch (err) {
         run.error = err instanceof Error ? err.message : String(err);
-        this.transitionState(run.runId, 'failed');
+        const current = this.runs.get(run.runId);
+        if (current?.status === 'running') {
+          this.transitionState(run.runId, 'failed');
+        }
       }
     }
   }

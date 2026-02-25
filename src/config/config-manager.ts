@@ -5,7 +5,7 @@ import type { AppConfig } from '../types/config.js';
 
 const DEFAULT_CONFIG: AppConfig = {
   llm: {
-    baseUrl: 'https://api.anthropic.com/v1',
+    baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
     model: 'claude-3-5-sonnet-20241022',
     maxTokens: 8192,

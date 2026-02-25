@@ -98,18 +98,26 @@ export class DependencyGraph {
 
 /**
  * Resolve a relative import path to an absolute-like project path.
- * e.g. fromFile="src/a/b.ts", importSource="./c" → "src/a/c"
+ * e.g. fromFile="src/a/b.ts", importSource="./c" → "src/a/c.ts"
+ *
+ * Handles:
+ * - Bare relative paths (./c → src/a/c.ts)
+ * - Already-extensioned paths (./c.js → src/a/c.ts, normalised to .ts)
+ * - Index imports (./utils → src/a/utils/index.ts if no extension)
  */
 function resolveRelativeImport(fromFile: string, importSource: string): string | null {
   if (!importSource.startsWith('.')) return null;
+
+  // Strip known JS/TS extensions from the import source so we can normalise
+  const stripped = importSource.replace(/\.(js|mjs|cjs|ts|mts|cts)$/, '');
 
   // Get directory of the source file
   const parts = fromFile.split('/');
   parts.pop(); // remove filename
   const dir = parts;
 
-  // Resolve the relative path
-  const importParts = importSource.split('/');
+  // Resolve the relative path segments
+  const importParts = stripped.split('/');
   for (const part of importParts) {
     if (part === '..') {
       dir.pop();
@@ -118,5 +126,6 @@ function resolveRelativeImport(fromFile: string, importSource: string): string |
     }
   }
 
-  return dir.join('/');
+  // Append .ts extension (project uses TypeScript source paths internally)
+  return dir.join('/') + '.ts';
 }

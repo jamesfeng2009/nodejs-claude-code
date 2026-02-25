@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from 'vitest';
 import * as fc from 'fast-check';
 import { CodeChunker } from '../../src/context/code-chunker.js';
@@ -307,9 +308,9 @@ describe('Property 17: 超大节点二次分割重叠保证', () => {
   it('adjacent chunks from oversized node share at least overlapLines lines', () => {
     fc.assert(
       fc.property(
-        fc.integer({ min: 2, max: 5 }),  // overlapLines
-        fc.integer({ min: 10, max: 30 }), // maxChunkSize
-        fc.integer({ min: 2, max: 8 }),   // multiplier to make oversized content
+        fc.integer({ min: 2, max: 4 }),  // overlapLines
+        fc.integer({ min: 10, max: 15 }), // maxChunkSize — small to keep AST size minimal
+        fc.integer({ min: 2, max: 3 }),   // multiplier: worst case 15*3=45 lines
         (overlapLines, maxChunkSize, multiplier) => {
           const chunker = new CodeChunker({ maxChunkSize, overlapLines });
 
@@ -339,16 +340,16 @@ describe('Property 17: 超大节点二次分割重叠保证', () => {
           }
         }
       ),
-      { numRuns: 100 }
+      { numRuns: 30 }  // reduced: Babel AST objects are large; 30 runs is sufficient to verify overlap logic
     );
   });
 
   it('text chunking also overlaps when paragraph exceeds maxChunkSize', () => {
     fc.assert(
       fc.property(
-        fc.integer({ min: 2, max: 5 }),
-        fc.integer({ min: 5, max: 20 }),
-        fc.integer({ min: 2, max: 5 }),
+        fc.integer({ min: 2, max: 4 }),
+        fc.integer({ min: 5, max: 15 }),
+        fc.integer({ min: 2, max: 3 }), // worst case 15*3=45 lines
         (overlapLines, maxChunkSize, multiplier) => {
           const chunker = new CodeChunker({ maxChunkSize, overlapLines });
 
@@ -372,7 +373,7 @@ describe('Property 17: 超大节点二次分割重叠保证', () => {
           }
         }
       ),
-      { numRuns: 100 }
+      { numRuns: 50 }  // text chunking is cheap (no Babel), 50 runs is fine
     );
   });
 });

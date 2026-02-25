@@ -128,7 +128,7 @@ export class ContextManager {
    * Intelligently truncate/summarize large tool outputs.
    * Preserves error messages and key code snippets.
    */
-  compressToolOutput(output: string, toolType: string): string {
+  compressToolOutput(output: string, _toolType: string): string {
     const lines = output.split('\n');
     const maxLines = this.config.toolOutputMaxLines;
 
@@ -177,7 +177,7 @@ export class ContextManager {
   }
 
   private matchesGitignorePattern(relativePath: string, name: string, pattern: string): boolean {
-    // Normalize pattern
+    // Normalize separators
     const p = pattern.replace(/\\/g, '/');
     const rp = relativePath.replace(/\\/g, '/');
 
@@ -187,8 +187,8 @@ export class ContextManager {
       return name === dirPattern || rp === dirPattern || rp.startsWith(dirPattern + '/');
     }
 
-    // Wildcard pattern
-    if (p.includes('*')) {
+    // Wildcard pattern — convert glob to regex safely (P1-8 fix)
+    if (p.includes('*') || p.includes('?')) {
       return this.globMatch(name, p) || this.globMatch(rp, p);
     }
 
@@ -196,13 +196,25 @@ export class ContextManager {
     return name === p || rp === p || rp.startsWith(p + '/');
   }
 
+  /**
+   * Convert a simple glob pattern to a RegExp and test the string.
+   * Supports * (any chars except /) and ** (any chars including /).
+   * P1-8 fix: replaced the broken UUID-based escape with a correct implementation.
+   */
   private globMatch(str: string, pattern: string): boolean {
-    // Convert glob to regex
-    const escaped = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*/g, '.*')
-      .replace(/\?/g, '.');
-    return new RegExp(`^${escaped}$`).test(str);
+    // Escape all regex special chars except * and ?
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    // Replace ** before * to avoid double-replacement
+    const regexStr = escaped
+      .replace(/\*\*/g, '\x00') // placeholder for **
+      .replace(/\*/g, '[^/]*')  // * matches anything except /
+      .replace(/\?/g, '[^/]')   // ? matches single char except /
+      .replace(/\x00/g, '.*');  // ** matches anything including /
+    try {
+      return new RegExp(`^${regexStr}$`).test(str);
+    } catch {
+      return false;
+    }
   }
 
   private buildDirectoryTree(

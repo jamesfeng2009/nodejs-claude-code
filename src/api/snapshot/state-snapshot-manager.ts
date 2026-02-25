@@ -2,11 +2,13 @@ import type { StateSnapshot } from '../../types/snapshot.js';
 import type { RunStateSummary } from '../../types/run.js';
 import type { SessionStore } from '../../session/session-store.js';
 import type { RunManager } from '../../agent/run-manager.js';
+import type { SSEStreamManager } from '../sse/sse-stream.js';
 
 export class StateSnapshotManager {
   constructor(
     private readonly sessionStore: SessionStore,
     private readonly runManager: RunManager,
+    private readonly sseManager: SSEStreamManager,
   ) {}
 
   /**
@@ -52,7 +54,7 @@ export class StateSnapshotManager {
       runId: run.runId,
       sessionId: run.sessionId,
       status: run.status,
-      lastEventSeq: 0,
+      lastEventSeq: this.sseManager.getCurrentSeq(runId),
     };
   }
 }

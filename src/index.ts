@@ -1,6 +1,10 @@
 /**
- * CLI entry point for the AI programming assistant.
- * Validates: Requirements 1.1, 6.5, 7.1, 7.2, 7.3, 7.4, 7.5
+ * Entry point for the AI programming assistant.
+ * Supports two modes:
+ *   --http   Start the HTTP API server (default port 3000)
+ *   (none)   Start the interactive CLI REPL
+ *
+ * Validates: Requirements 1.1, 6.5, 7.1, 7.2, 7.3, 7.4, 7.5, 10.1, 10.3
  */
 import { ConfigManager } from './config/config-manager.js';
 import { LLMClient } from './llm/client.js';
@@ -16,6 +20,11 @@ import { ConversationManager } from './conversation/manager.js';
 import { SubAgentManager } from './agent/sub-agent-manager.js';
 import { OrchestratorAgent } from './agent/orchestrator.js';
 import { SessionStore } from './session/session-store.js';
+import { IdempotencyStore } from './api/idempotency/idempotency-store.js';
+import { SSEStreamManager } from './api/sse/sse-stream.js';
+import { StateSnapshotManager } from './api/snapshot/state-snapshot-manager.js';
+import { RunManager } from './agent/run-manager.js';
+import { HTTPAPIServer } from './api/server.js';
 import { createFileReadTool } from './tools/implementations/file-read.js';
 import { createFileWriteTool } from './tools/implementations/file-write.js';
 import { createFileEditTool } from './tools/implementations/file-edit.js';
@@ -27,6 +36,8 @@ import { REPL } from './cli/repl.js';
 
 async function main(): Promise<void> {
   const workDir = process.cwd();
+  const args = process.argv.slice(2);
+  const httpMode = args.includes('--http');
 
   // Load configuration (env vars > project config > global config > defaults)
   const config = ConfigManager.load(workDir);
@@ -61,7 +72,8 @@ async function main(): Promise<void> {
   // ── Retrieval stack ───────────────────────────────────────────────────────
   const embeddingEngine = new EmbeddingEngine({
     apiKey: config.llm.apiKey,
-    baseUrl: config.llm.baseUrl,
+    // Use a dedicated embedding base URL if configured; otherwise default to OpenAI.
+    baseUrl: process.env['AI_ASSISTANT_EMBEDDING_BASE_URL'],
   });
   const vectorStore = new VectorStore({ dimensions: embeddingEngine.dimensions });
   const bm25Index = new BM25Index();
@@ -107,13 +119,38 @@ async function main(): Promise<void> {
   );
 
   // ── Session store ─────────────────────────────────────────────────────────
-  const _sessionStore = new SessionStore(workDir);
+  const sessionStore = new SessionStore(workDir);
 
-  // ── CLI ───────────────────────────────────────────────────────────────────
-  const renderer = new StreamingRenderer();
-  const repl = new REPL(orchestrator, renderer);
+  if (httpMode) {
+    // ── HTTP API Server mode (P1-9 fix) ──────────────────────────────────
+    const runManager = new RunManager();
+    const sseManager = new SSEStreamManager();
+    const snapshotManager = new StateSnapshotManager(sessionStore, runManager, sseManager);
+    const idempotencyStore = new IdempotencyStore(config.idempotency.ttlMs);
 
-  await repl.start();
+    // Bearer token: wrap single string into array for BearerTokenAuth
+    const validTokens = config.httpApi.bearerToken ? [config.httpApi.bearerToken] : [];
+
+    const server = new HTTPAPIServer({
+      port: config.httpApi.port,
+      host: config.httpApi.host,
+      validTokens,
+      allowedOrigins: config.httpApi.corsAllowedOrigins,
+      sessionStore,
+      runManager,
+      snapshotManager,
+      idempotencyStore,
+      orchestrator,
+    });
+
+    await server.start();
+    console.log(`HTTP API server listening on ${config.httpApi.host}:${config.httpApi.port}`);
+  } else {
+    // ── CLI REPL mode ─────────────────────────────────────────────────────
+    const renderer = new StreamingRenderer();
+    const repl = new REPL(orchestrator, renderer);
+    await repl.start();
+  }
 }
 
 main().catch((err) => {

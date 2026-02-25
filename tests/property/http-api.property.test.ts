@@ -72,22 +72,27 @@ describe('Property 45: SSE 事件流类型完整性', () => {
 // **Validates: Requirements 14.2, 14.5**
 
 describe('Property 59: SSE 重新订阅与状态摘要', () => {
-  it('resubscribe returns a state_summary event with the RunStateSummary as data', () => {
+  it('resubscribe pushes a state_summary event with the RunStateSummary as data', () => {
     fc.assert(
       fc.property(fc.uuid(), runStateSummaryArb, (runId, stateSummary) => {
         const manager = new SSEStreamManager();
         manager.createStream(runId);
 
-        const event = manager.resubscribe(runId, stateSummary);
+        // Capture the event pushed by resubscribe via a mock ServerResponse
+        let writtenData = '';
+        const mockRes = {
+          write: (chunk: string) => { writtenData += chunk; },
+          end: () => {},
+          once: (_event: string, _handler: () => void) => {},
+        } as unknown as import('http').ServerResponse;
 
-        // Must be a state_summary event
-        expect(event.event).toBe('state_summary');
-        // Data must contain the RunStateSummary
-        expect(event.data).toEqual(stateSummary);
-        // Must have all required SSEEvent fields
-        expect(typeof event.id).toBe('string');
-        expect(typeof event.seq).toBe('number');
-        expect(typeof event.timestamp).toBe('number');
+        manager.resubscribe(runId, mockRes, stateSummary);
+
+        // The written SSE data must contain a state_summary event line
+        expect(writtenData).toContain('event: state_summary');
+        // And the stateSummary fields must appear in the data line
+        expect(writtenData).toContain(stateSummary.runId);
+        expect(writtenData).toContain(stateSummary.status);
       }),
       { numRuns: 200 },
     );

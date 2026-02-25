@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile, unlink, readdir } from 'fs/promises';
 import { join } from 'path';
+import { randomUUID } from 'crypto';
 import type { Session, SessionSummary } from '../types/session.js';
 
 export class SessionStore {
@@ -13,7 +14,7 @@ export class SessionStore {
   create(): Session {
     const now = Date.now();
     return {
-      sessionId: crypto.randomUUID(),
+      sessionId: randomUUID(),
       createdAt: now,
       updatedAt: now,
       conversationHistory: [],

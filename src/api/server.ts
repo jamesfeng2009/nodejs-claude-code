@@ -40,15 +40,20 @@ export class HTTPAPIServer {
     this.cors = new CORSMiddleware(options.allowedOrigins);
     this.sseManager = new SSEStreamManager();
 
+    // Wire the run handler so RunManager drives serial execution per session.
+    // NOTE: executeRun does NOT call transitionState('running') itself —
+    // enqueueRun already does that before invoking the handler.
+    options.runManager.setHandler((run) =>
+      this.executeRun(run.runId, run.sessionId, run.request, run.request.idempotencyKey, options.orchestrator),
+    );
+
     this.registerMiddleware();
     this.registerRoutes();
   }
 
   private registerMiddleware(): void {
-    // Register CORS hooks
     this.cors.addHooks(this.fastify as unknown as Parameters<CORSMiddleware['addHooks']>[0]);
 
-    // Register auth as a preHandler on all routes
     this.fastify.addHook(
       'preHandler',
       (
@@ -66,7 +71,7 @@ export class HTTPAPIServer {
   }
 
   private registerRoutes(): void {
-    const { sessionStore, runManager, snapshotManager, idempotencyStore, orchestrator } =
+    const { sessionStore, runManager, snapshotManager, idempotencyStore } =
       this.options;
 
     // POST /api/sessions — create session
@@ -128,45 +133,41 @@ export class HTTPAPIServer {
         return reply.code(400).send({ error: 'Bad Request', message: 'message is required' });
       }
 
-      // Check idempotency
+      // Two-layer idempotency check
       const idempotencyResult = idempotencyStore.check(idempotencyKey);
       if (idempotencyResult.status === 'completed') {
+        // Return cached result — run already finished
         return reply.code(200).send(idempotencyResult.result);
       }
       if (idempotencyResult.status === 'in_flight') {
-        return reply.code(202).send({ message: 'Request is already being processed' });
+        // A run for this key is already executing.
+        // Look up the existing runId so the client can subscribe to SSE.
+        const existingRunId = idempotencyStore.getRunId(idempotencyKey);
+        return reply.code(202).send({
+          runId: existingRunId,
+          message: 'Request is already being processed',
+        });
       }
 
-      // Submit new run
+      // New request — submit run and enqueue for serial session execution
       const agentRequest: AgentRequest = { message, idempotencyKey };
       const run = runManager.submit(request.params.sessionId, agentRequest);
 
-      // Create SSE stream for this run
+      // Record the runId in the idempotency store so in_flight retries can find it
+      idempotencyStore.setRunId(idempotencyKey, run.runId);
+
+      // Create SSE stream before kicking off async work so subscribers never miss events
       this.sseManager.createStream(run.runId);
 
-      // Process the run asynchronously
-      this.processRunAsync(run.runId, request.params.sessionId, agentRequest, idempotencyKey, orchestrator).catch(
-        (err) => {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          try {
-            runManager.transitionState(run.runId, 'failed');
-          } catch {
-            // already transitioned
-          }
-          this.sseManager.pushEvent(run.runId, {
-            event: 'run_failed',
-            data: { runId: run.runId, error: errorMsg },
-          });
-          idempotencyStore.fail(idempotencyKey);
-        },
-      );
-
-      idempotencyStore.complete(idempotencyKey, { runId: run.runId });
+      // Enqueue: RunManager ensures at most one run executes per session at a time
+      runManager.enqueueRun(run);
 
       return reply.code(202).send({ runId: run.runId });
     });
 
     // GET /api/sessions/:sessionId/runs/:runId/events — SSE event stream
+    // Keeps the connection open and streams events until the run completes.
+    // On resubscribe, sends state_summary first then continues streaming.
     // Requirements: 10.2, 14.2
     this.fastify.get<{ Params: { sessionId: string; runId: string } }>(
       '/api/sessions/:sessionId/runs/:runId/events',
@@ -178,7 +179,7 @@ export class HTTPAPIServer {
           return reply.code(404).send({ error: 'Not Found', message: 'Run not found' });
         }
 
-        // Set SSE headers
+        // Must use raw response to keep the connection open for SSE
         reply.raw.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -186,14 +187,32 @@ export class HTTPAPIServer {
           'X-Accel-Buffering': 'no',
         });
 
-        // If run is already done, send a final state_summary and close
         const summary = snapshotManager.getRunSummary(runId);
-        if (summary) {
-          const event = this.sseManager.resubscribe(runId, summary);
-          reply.raw.write(this.formatSSEEvent(event));
+
+        if (run.status === 'completed' || run.status === 'failed') {
+          // Run already finished — send state_summary and close immediately.
+          // Re-create a temporary stream so pushEvent can write to this response.
+          if (summary) {
+            this.sseManager.createStream(runId);
+            this.sseManager.subscribe(runId, reply.raw);
+            this.sseManager.pushEvent(runId, {
+              event: 'state_summary',
+              data: summary,
+            });
+            this.sseManager.closeStream(runId);
+          } else {
+            reply.raw.end();
+          }
+        } else {
+          // Run still in progress — subscribe and keep connection open.
+          // closeStream() will call res.end() on all subscribers when the run finishes.
+          if (summary) {
+            this.sseManager.resubscribe(runId, reply.raw, summary);
+          } else {
+            this.sseManager.subscribe(runId, reply.raw);
+          }
         }
 
-        reply.raw.end();
         return reply;
       },
     );
@@ -222,32 +241,24 @@ export class HTTPAPIServer {
     );
   }
 
-  private formatSSEEvent(event: {
-    id: string;
-    seq: number;
-    event: string;
-    data: unknown;
-    timestamp: number;
-  }): string {
-    return [
-      `id: ${event.id}`,
-      `event: ${event.event}`,
-      `data: ${JSON.stringify({ seq: event.seq, timestamp: event.timestamp, ...((event.data as object) ?? {}) })}`,
-      '',
-      '',
-    ].join('\n');
-  }
-
-  private async processRunAsync(
+  /**
+   * Runs the agent for a single run, pushing SSE events to subscribers.
+   * Called by RunManager's handler — guaranteed serial per session.
+   * The run is already in 'running' state when this is called (enqueueRun transitions it).
+   * Idempotency is marked complete/failed here — after the run actually finishes.
+   * Requirements: 12.2, 13.4, 13.6
+   */
+  private async executeRun(
     runId: string,
     _sessionId: string,
     request: AgentRequest,
-    _idempotencyKey: string,
+    idempotencyKey: string,
     orchestrator: OrchestratorAgent,
   ): Promise<void> {
-    const { runManager } = this.options;
+    const { idempotencyStore } = this.options;
 
-    runManager.transitionState(runId, 'running');
+    // The run is already in 'running' state (enqueueRun transitioned it).
+    // Just push the status event.
     this.sseManager.pushEvent(runId, {
       event: 'run_status',
       data: { runId, status: 'running' },
@@ -273,34 +284,34 @@ export class HTTPAPIServer {
         }
       }
 
-      runManager.transitionState(runId, 'completed');
+      // RunManager.enqueueRun will transition to 'completed' after handler returns.
       this.sseManager.pushEvent(runId, {
         event: 'run_complete',
         data: { runId, status: 'completed' },
       });
+
+      // Mark idempotency complete only after the run has actually finished
+      idempotencyStore.complete(idempotencyKey, { runId, status: 'completed' });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      runManager.transitionState(runId, 'failed');
       this.sseManager.pushEvent(runId, {
         event: 'run_failed',
         data: { runId, error: errorMsg },
       });
+      // Release the in-flight record so retries can re-execute
+      idempotencyStore.fail(idempotencyKey);
+      // Re-throw so enqueueRun can transition to 'failed'
       throw err;
     } finally {
+      // Close all subscriber connections for this run
       this.sseManager.closeStream(runId);
     }
   }
 
-  /**
-   * Starts the Fastify server.
-   */
   async start(): Promise<void> {
     await this.fastify.listen({ port: this.options.port, host: this.options.host });
   }
 
-  /**
-   * Stops the Fastify server.
-   */
   async stop(): Promise<void> {
     await this.fastify.close();
   }

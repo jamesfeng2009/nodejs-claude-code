@@ -6,14 +6,15 @@ export interface ShellConfirmFn {
 }
 
 /**
- * Default confirmation function - auto-confirms (for non-interactive use).
- * In CLI mode, this should be replaced with a real user prompt.
+ * Default confirmation function — rejects execution.
+ * Callers must explicitly inject a confirm function to allow shell commands.
+ * This prevents accidental auto-execution in contexts where no UI is wired up.
  */
-const autoConfirm: ShellConfirmFn = async () => true;
+const denyConfirm: ShellConfirmFn = async () => false;
 
 export function createShellExecuteTool(
   workDir: string,
-  confirm: ShellConfirmFn = autoConfirm
+  confirm: ShellConfirmFn = denyConfirm
 ): Tool {
   return {
     definition: {

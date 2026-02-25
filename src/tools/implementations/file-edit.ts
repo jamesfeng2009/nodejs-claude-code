@@ -56,7 +56,7 @@ export function createFileEditTool(workDir: string): Tool {
           };
         }
 
-        const updated = original.replace(oldText, newText);
+        const updated = original.replace(oldText, () => newText);
         writeFileSync(absPath, updated, 'utf-8');
 
         return {
