@@ -1,0 +1,120 @@
+import readline from 'readline';
+import type { OrchestratorAgent } from '../agent/orchestrator.js';
+import type { StreamingRenderer } from './streaming-renderer.js';
+
+/**
+ * Interactive REPL for the CLI application.
+ * Validates: Requirements 1.1, 1.2, 1.4, 1.5
+ */
+export class REPL {
+  private rl: readline.Interface | null = null;
+  private isShuttingDown = false;
+
+  constructor(
+    private readonly orchestrator: OrchestratorAgent,
+    private readonly renderer: StreamingRenderer,
+  ) {}
+
+  /**
+   * Start the REPL loop using Node.js readline.
+   * Shows a welcome message and `> ` prompt, reads input line by line.
+   */
+  async start(): Promise<void> {
+    this.rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    console.log('Welcome to AI Assistant. Type /exit to quit, /clear to reset conversation.');
+
+    // Handle terminal resize — adapt renderer width
+    process.stdout.on('resize', () => {
+      this.renderer.adaptToWidth(process.stdout.columns ?? 80);
+    });
+    // Set initial width
+    this.renderer.adaptToWidth(process.stdout.columns ?? 80);
+
+    // Graceful Ctrl+C
+    process.on('SIGINT', () => {
+      void this.shutdown();
+    });
+
+    this.rl.on('line', (input) => {
+      void this.handleInput(input.trim());
+    });
+
+    this.rl.on('close', () => {
+      if (!this.isShuttingDown) {
+        void this.shutdown();
+      }
+    });
+
+    this.rl.setPrompt('> ');
+    this.rl.prompt();
+  }
+
+  /**
+   * Handle a single line of user input.
+   * - `/exit` → shutdown
+   * - `/clear` → clear conversation history
+   * - anything else → pass to orchestrator and stream response
+   */
+  async handleInput(input: string): Promise<void> {
+    if (input === '/exit') {
+      await this.shutdown();
+      return;
+    }
+
+    if (input === '/clear') {
+      // Access conversationManager via the orchestrator's public interface if available,
+      // otherwise just print a message.
+      const orch = this.orchestrator as unknown as {
+        conversationManager?: { clear(): void };
+      };
+      if (orch.conversationManager && typeof orch.conversationManager.clear === 'function') {
+        orch.conversationManager.clear();
+      }
+      console.log('Conversation cleared.');
+      this.rl?.prompt();
+      return;
+    }
+
+    if (input === '') {
+      this.rl?.prompt();
+      return;
+    }
+
+    try {
+      // Stream the response from the orchestrator
+      for await (const chunk of this.orchestrator.processMessage(input)) {
+        if (chunk.type === 'text' && chunk.content) {
+          this.renderer.renderToken(chunk.content);
+        } else if (chunk.type === 'tool_call_start' && chunk.toolCall) {
+          this.renderer.renderToolCall(
+            chunk.toolCall.name ?? '',
+            (chunk.toolCall.arguments as Record<string, unknown>) ?? {},
+          );
+        }
+      }
+      // Ensure we end on a new line after streaming
+      process.stdout.write('\n');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.renderer.renderError(message);
+    }
+
+    this.rl?.prompt();
+  }
+
+  /**
+   * Gracefully close the readline interface and print a goodbye message.
+   */
+  async shutdown(): Promise<void> {
+    if (this.isShuttingDown) return;
+    this.isShuttingDown = true;
+
+    console.log('\nGoodbye!');
+    this.rl?.close();
+    process.exit(0);
+  }
+}

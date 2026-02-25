@@ -1,0 +1,26 @@
+export enum ErrorCode {
+  CONFIG_LOAD_ERROR = 'CONFIG_LOAD_ERROR',
+  LLM_API_ERROR = 'LLM_API_ERROR',
+  LLM_RETRY_EXHAUSTED = 'LLM_RETRY_EXHAUSTED',
+  TOOL_NOT_FOUND = 'TOOL_NOT_FOUND',
+  TOOL_VALIDATION_ERROR = 'TOOL_VALIDATION_ERROR',
+  TOOL_EXECUTION_ERROR = 'TOOL_EXECUTION_ERROR',
+  FILE_ACCESS_DENIED = 'FILE_ACCESS_DENIED',
+  FILE_NOT_FOUND = 'FILE_NOT_FOUND',
+  SESSION_NOT_FOUND = 'SESSION_NOT_FOUND',
+  RUN_NOT_FOUND = 'RUN_NOT_FOUND',
+  IDEMPOTENCY_KEY_MISSING = 'IDEMPOTENCY_KEY_MISSING',
+  AUTH_FAILED = 'AUTH_FAILED',
+  CORS_DENIED = 'CORS_DENIED',
+}
+
+export class AppError extends Error {
+  constructor(
+    public readonly code: ErrorCode,
+    message: string,
+    public readonly details?: unknown
+  ) {
+    super(message);
+    this.name = 'AppError';
+  }
+}
