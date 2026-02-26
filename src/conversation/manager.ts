@@ -1,4 +1,4 @@
-import type { Message } from '../types/messages.js';
+import type { Message, ContentBlock } from '../types/messages.js';
 import type { KeyEntityCache } from '../context/key-entity-cache.js';
 
 export interface ConversationConfig {
@@ -74,6 +74,23 @@ export class ConversationManager {
     // Error results and user-confirmed operations are left untouched.
     nonSystemMessages = nonSystemMessages.map((msg) => {
       if (!this.shouldCompressToolResult(msg)) return msg;
+
+      // For ContentBlock arrays: replace ImageBlock/FileBlock with placeholder text
+      if (Array.isArray(msg.content)) {
+        const compressed = msg.content.map((block) => {
+          if (block.type === 'image') {
+            return { type: 'text' as const, text: `[图片已压缩: ${block.mimeType}]` };
+          } else if (block.type === 'file') {
+            return { type: 'text' as const, text: `[文件已压缩: ${block.filename ?? block.mimeType}]` };
+          }
+          return block;
+        });
+        // Merge all text blocks into a single string for compactness
+        const text = compressed.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+        return { ...msg, content: text };
+      }
+
+      // Plain string content: summarise long outputs
       const lines = msg.content.split('\n');
       if (lines.length <= 10) return msg; // already short, skip
       const head = lines.slice(0, 6).join('\n');
@@ -97,6 +114,7 @@ export class ConversationManager {
     }
 
     const systemTokens = estimateTokens([...systemMessages, summaryMessage]);
+    void systemTokens; // kept for potential future use
 
     // If the summary alone exceeds lowWaterMark, truncate it to fit
     let finalSummaryMessage = summaryMessage;
@@ -130,8 +148,9 @@ export class ConversationManager {
 
     // If even the last turn + summary exceeds lowWaterMark, truncate the recent messages
     // to fit within lowWaterMark. Always keep at least the last user message.
+    // Use the same token estimation as getTokenCount() to avoid rounding discrepancies.
     while (
-      finalSystemTokens + estimateTokens(recentMessages) > this.config.lowWaterMark &&
+      estimateTokens([...systemMessages, finalSummaryMessage, ...recentMessages]) >= this.config.lowWaterMark &&
       recentMessages.length > 1
     ) {
       // Find the last user message index — never drop it
@@ -160,6 +179,15 @@ export class ConversationManager {
     }
 
     // Rebuild: system + summary + recent turns
+    // If still over lowWaterMark (can't trim messages further), truncate the summary to fit
+    const assembled = [...systemMessages, finalSummaryMessage, ...recentMessages];
+    const assembledTokens = estimateTokens(assembled);
+    if (assembledTokens > this.config.lowWaterMark) {
+      const recentTokens = estimateTokens([...systemMessages, ...recentMessages]);
+      const maxSummaryChars = Math.max(0, (this.config.lowWaterMark - recentTokens) * 4 - 4);
+      const truncatedContent = finalSummaryMessage.content.slice(0, maxSummaryChars) || '[Conversation Summary]';
+      finalSummaryMessage = { ...finalSummaryMessage, content: truncatedContent };
+    }
     this.messages = [...systemMessages, finalSummaryMessage, ...recentMessages];
   }
 
@@ -174,25 +202,36 @@ export class ConversationManager {
     const operationHistory: string[] = [];
 
     for (const msg of messages) {
-      // Extract entities from all message content
-      const entities = this.entityCache.extractEntities(msg.content);
+      // Extract text content for entity recognition
+      const textContent = extractTextContent(msg.content);
+
+      // Record multimodal entries in keyEntities
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'image') {
+            keyEntities.add(`image:${block.mimeType}`);
+          } else if (block.type === 'file') {
+            keyEntities.add(`file:${block.filename ?? block.mimeType}`);
+          }
+        }
+      }
+
+      // Extract entities from text content
+      const entities = this.entityCache.extractEntities(textContent);
       for (const entity of entities) {
         keyEntities.add(`${entity.type}:${entity.value}`);
       }
 
       if (msg.role === 'user') {
-        // User messages may contain decisions / confirmations
-        if (isConfirmationMessage(msg.content)) {
-          decisions.push(msg.content.trim());
+        if (isConfirmationMessage(textContent)) {
+          decisions.push(textContent.trim());
         }
       } else if (msg.role === 'assistant') {
-        // Summarise assistant actions
         const summary = summariseAssistantMessage(msg);
         if (summary) operationHistory.push(summary);
       } else if (msg.role === 'tool') {
-        // Capture errors from tool results
         if (isErrorToolResult(msg)) {
-          errors.push(msg.content.trim());
+          errors.push(textContent.trim());
         } else {
           const summary = summariseToolResult(msg);
           if (summary) operationHistory.push(summary);
@@ -208,11 +247,6 @@ export class ConversationManager {
     };
   }
 
-  /**
-   * Determine whether a tool result message should be compressed.
-   * Error messages and user-confirmed operations are NOT compressed.
-   * File content and large outputs CAN be summarised.
-   */
   shouldCompressToolResult(message: Message): boolean {
     if (message.role !== 'tool') return false;
 
@@ -256,10 +290,30 @@ export class ConversationManager {
 
 // ─── Token estimation ─────────────────────────────────────────────────────────
 
+function estimateContentTokens(content: string | ContentBlock[]): number {
+  if (typeof content === 'string') {
+    return content.length;
+  }
+  let chars = 0;
+  for (const block of content) {
+    if (block.type === 'text') {
+      chars += block.text.length;
+    } else if (block.type === 'image' || block.type === 'file') {
+      if (block.data) {
+        chars += block.data.length; // will be divided by 4 at the end
+      } else if (block.url) {
+        chars += 80; // 20 tokens * 4 chars/token
+      }
+      // mediaId: treat as negligible (just the id string)
+    }
+  }
+  return chars;
+}
+
 function estimateTokens(messages: Message[]): number {
   let chars = 0;
   for (const msg of messages) {
-    chars += msg.content.length;
+    chars += estimateContentTokens(msg.content);
     if (msg.toolCalls) {
       for (const tc of msg.toolCalls) {
         chars += tc.name.length + JSON.stringify(tc.arguments).length;
@@ -270,10 +324,24 @@ function estimateTokens(messages: Message[]): number {
   return Math.ceil(chars / 4);
 }
 
+// ─── Text extraction helper ───────────────────────────────────────────────────
+
+/**
+ * Extract plain text from a message content (string or ContentBlock[]).
+ * For ContentBlock arrays, concatenates text from all TextBlocks.
+ */
+function extractTextContent(content: string | ContentBlock[]): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((b): b is import('../types/messages.js').TextBlock => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+}
+
 // ─── Message classification helpers ──────────────────────────────────────────
 
 function isErrorToolResult(message: Message): boolean {
-  const content = message.content.toLowerCase();
+  const content = extractTextContent(message.content).toLowerCase();
   return (
     content.includes('error') ||
     content.includes('failed') ||
@@ -286,7 +354,7 @@ function isErrorToolResult(message: Message): boolean {
 }
 
 function isUserConfirmedOperation(message: Message): boolean {
-  const content = message.content.toLowerCase();
+  const content = extractTextContent(message.content).toLowerCase();
   return (
     content.includes('confirmed') ||
     content.includes('approved') ||
@@ -315,16 +383,17 @@ function summariseAssistantMessage(message: Message): string | null {
     const names = message.toolCalls.map((tc) => tc.name).join(', ');
     return `Called tools: ${names}`;
   }
-  if (message.content.length > 0) {
-    // Keep first 100 chars as a brief summary
-    const brief = message.content.slice(0, 100).replace(/\n/g, ' ');
-    return message.content.length > 100 ? `${brief}…` : brief;
+  const text = extractTextContent(message.content);
+  if (text.length > 0) {
+    const brief = text.slice(0, 100).replace(/\n/g, ' ');
+    return text.length > 100 ? `${brief}…` : brief;
   }
   return null;
 }
 
 function summariseToolResult(message: Message): string | null {
   const name = message.name ?? 'tool';
-  const brief = message.content.slice(0, 80).replace(/\n/g, ' ');
-  return `${name}: ${brief}${message.content.length > 80 ? '…' : ''}`;
+  const text = extractTextContent(message.content);
+  const brief = text.slice(0, 80).replace(/\n/g, ' ');
+  return `${name}: ${brief}${text.length > 80 ? '…' : ''}`;
 }

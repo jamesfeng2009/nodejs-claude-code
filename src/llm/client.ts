@@ -1,5 +1,6 @@
-import type { Message } from '../types/messages.js';
+import type { Message, ContentBlock, ImageBlock, FileBlock } from '../types/messages.js';
 import type { ToolDefinition, ToolCall } from '../types/tools.js';
+import type { MediaStore } from '../media/media-store.js';
 
 export interface LLMClientConfig {
   apiKey: string;
@@ -15,10 +16,32 @@ export interface StreamChunk {
   toolCall?: Partial<ToolCall>;
 }
 
+// Claude API multimodal content block types
+interface ClaudeImageBlock {
+  type: 'image';
+  source:
+    | { type: 'base64'; media_type: string; data: string }
+    | { type: 'url'; url: string };
+}
+
+interface ClaudeDocumentBlock {
+  type: 'document';
+  source:
+    | { type: 'base64'; media_type: string; data: string }
+    | { type: 'url'; url: string };
+}
+
+interface ClaudeTextBlock {
+  type: 'text';
+  text: string;
+}
+
+type ClaudeContentBlock = ClaudeImageBlock | ClaudeDocumentBlock | ClaudeTextBlock;
+
 // OpenAI-compatible request/response types
 interface OpenAIMessage {
   role: string;
-  content: string | null;
+  content: string | ClaudeContentBlock[] | null;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -68,9 +91,11 @@ interface OpenAIStreamChunk {
 
 export class LLMClient {
   private config: LLMClientConfig;
+  private mediaStore?: MediaStore;
 
-  constructor(config: LLMClientConfig) {
+  constructor(config: LLMClientConfig, mediaStore?: MediaStore) {
     this.config = config;
+    this.mediaStore = mediaStore;
   }
 
   /**
@@ -79,7 +104,7 @@ export class LLMClient {
    * Includes exponential backoff retry (max 3 retries).
    */
   async *chat(messages: Message[], tools: ToolDefinition[]): AsyncGenerator<StreamChunk> {
-    const openAIMessages = this.convertMessages(messages);
+    const openAIMessages = await this.convertMessages(messages);
     const openAITools = this.convertTools(tools);
 
     const requestBody = this.buildRequestBody(openAIMessages, openAITools);
@@ -116,13 +141,18 @@ export class LLMClient {
   }
 
   /**
-   * Convert internal Message format to OpenAI format.
+   * Convert internal Message format to OpenAI/Claude format.
+   * Supports both plain string content and ContentBlock arrays.
    */
-  convertMessages(messages: Message[]): OpenAIMessage[] {
-    return messages.map((msg) => {
+  async convertMessages(messages: Message[]): Promise<OpenAIMessage[]> {
+    const result: OpenAIMessage[] = [];
+
+    for (const msg of messages) {
       const openAIMsg: OpenAIMessage = {
         role: msg.role,
-        content: msg.content,
+        content: typeof msg.content === 'string'
+          ? msg.content
+          : await this.convertContentBlocks(msg.content),
       };
 
       if (msg.toolCalls && msg.toolCalls.length > 0) {
@@ -148,8 +178,82 @@ export class LLMClient {
         openAIMsg.name = msg.name;
       }
 
-      return openAIMsg;
-    });
+      result.push(openAIMsg);
+    }
+
+    return result;
+  }
+
+  /**
+   * Convert an array of ContentBlocks to Claude API format.
+   */
+  private async convertContentBlocks(blocks: ContentBlock[]): Promise<ClaudeContentBlock[]> {
+    const result: ClaudeContentBlock[] = [];
+
+    for (const block of blocks) {
+      if (block.type === 'text') {
+        result.push({ type: 'text', text: block.text });
+      } else if (block.type === 'image') {
+        result.push(await this.convertImageBlock(block));
+      } else if (block.type === 'file') {
+        result.push(await this.convertFileBlock(block));
+      }
+    }
+
+    return result;
+  }
+
+  private async convertImageBlock(block: ImageBlock): Promise<ClaudeImageBlock> {
+    if (block.data) {
+      return {
+        type: 'image',
+        source: { type: 'base64', media_type: block.mimeType, data: block.data },
+      };
+    }
+    if (block.url) {
+      return {
+        type: 'image',
+        source: { type: 'url', url: block.url },
+      };
+    }
+    if (block.mediaId) {
+      const resolved = await this.resolveMediaId(block.mediaId);
+      return {
+        type: 'image',
+        source: { type: 'base64', media_type: resolved.mimeType, data: resolved.data },
+      };
+    }
+    throw new Error('ContentBlock must have either data, url, or mediaId');
+  }
+
+  private async convertFileBlock(block: FileBlock): Promise<ClaudeDocumentBlock> {
+    if (block.data) {
+      return {
+        type: 'document',
+        source: { type: 'base64', media_type: block.mimeType, data: block.data },
+      };
+    }
+    if (block.url) {
+      return {
+        type: 'document',
+        source: { type: 'url', url: block.url },
+      };
+    }
+    if (block.mediaId) {
+      const resolved = await this.resolveMediaId(block.mediaId);
+      return {
+        type: 'document',
+        source: { type: 'base64', media_type: resolved.mimeType, data: resolved.data },
+      };
+    }
+    throw new Error('ContentBlock must have either data, url, or mediaId');
+  }
+
+  private async resolveMediaId(mediaId: string): Promise<{ data: string; mimeType: string }> {
+    if (!this.mediaStore) {
+      throw new Error(`Media file not found for mediaId: ${mediaId}`);
+    }
+    return this.mediaStore.resolve(mediaId);
   }
 
   /**

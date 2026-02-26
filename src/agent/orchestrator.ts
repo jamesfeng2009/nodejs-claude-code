@@ -3,7 +3,7 @@ import type { ToolRegistry } from '../tools/registry.js';
 import type { ContextManager } from '../context/context-manager.js';
 import type { ConversationManager } from '../conversation/manager.js';
 import type { SubAgentManager } from './sub-agent-manager.js';
-import type { Message } from '../types/messages.js';
+import type { ContentBlock, Message } from '../types/messages.js';
 import type { ToolCall } from '../types/tools.js';
 
 export class OrchestratorAgent {
@@ -40,7 +40,7 @@ export class OrchestratorAgent {
    * Public entry point: process a user message and stream response chunks.
    * Validates: Requirements 1.2, 5.1
    */
-  async *processMessage(userMessage: string): AsyncGenerator<StreamChunk> {
+  async *processMessage(userMessage: string | ContentBlock[]): AsyncGenerator<StreamChunk> {
     // Add user message to conversation history
     this.conversationManager.addMessage({
       role: 'user',
@@ -56,7 +56,14 @@ export class OrchestratorAgent {
     const projectContext = await this.projectContextPromise;
 
     // Retrieve semantically relevant chunks for this specific message.
-    const relevantChunks = await this.contextManager.getRelevantContext(userMessage);
+    // When userMessage is a ContentBlock[], extract text for context retrieval.
+    const textForContext = Array.isArray(userMessage)
+      ? userMessage
+          .filter((b) => b.type === 'text')
+          .map((b) => (b as { type: 'text'; text: string }).text)
+          .join(' ')
+      : userMessage;
+    const relevantChunks = await this.contextManager.getRelevantContext(textForContext);
 
     // Build system prompt with project structure + relevant code context.
     const systemPrompt = this.contextManager.buildSystemPrompt(projectContext, relevantChunks);
@@ -177,7 +184,7 @@ export class OrchestratorAgent {
       // Re-inject system prompt at the top of the compressed history.
       const systemMsg = currentMessages.find((m) => m.role === 'system');
       if (systemMsg) {
-        currentMessages = this.injectSystemMessage(compressed, systemMsg.content);
+        currentMessages = this.injectSystemMessage(compressed, systemMsg.content as string);
       } else {
         currentMessages = compressed;
       }

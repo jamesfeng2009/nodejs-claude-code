@@ -388,15 +388,15 @@ describe('Property 3: 指数退避重试行为', () => {
 });
 
 describe('Property 4: 请求消息组装格式正确性', () => {
-  it('request body conforms to OpenAI Chat Completion API format', () => {
-    fc.assert(
-      fc.property(
+  it('request body conforms to OpenAI Chat Completion API format', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.array(messageArb, { minLength: 1, maxLength: 10 }),
         fc.array(toolDefinitionArb, { minLength: 0, maxLength: 5 }),
-        (messages, tools) => {
+        async (messages, tools) => {
           const client = new LLMClient(defaultConfig);
 
-          const openAIMessages = client.convertMessages(messages);
+          const openAIMessages = await client.convertMessages(messages);
           const openAITools = client.convertTools(tools);
           const requestBody = client.buildRequestBody(openAIMessages, openAITools);
 
@@ -447,13 +447,13 @@ describe('Property 4: 请求消息组装格式正确性', () => {
     );
   });
 
-  it('messages array preserves role and content for all message types', () => {
-    fc.assert(
-      fc.property(
+  it('messages array preserves role and content for all message types', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.array(messageArb, { minLength: 1, maxLength: 10 }),
-        (messages) => {
+        async (messages) => {
           const client = new LLMClient(defaultConfig);
-          const openAIMessages = client.convertMessages(messages);
+          const openAIMessages = await client.convertMessages(messages);
 
           expect(openAIMessages.length).toBe(messages.length);
 
@@ -498,13 +498,13 @@ describe('Property 4: 请求消息组装格式正确性', () => {
     );
   });
 
-  it('empty tools array results in no tools field in request body', () => {
-    fc.assert(
-      fc.property(
+  it('empty tools array results in no tools field in request body', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.array(messageArb, { minLength: 1, maxLength: 5 }),
-        (messages) => {
+        async (messages) => {
           const client = new LLMClient(defaultConfig);
-          const openAIMessages = client.convertMessages(messages);
+          const openAIMessages = await client.convertMessages(messages);
           const requestBody = client.buildRequestBody(openAIMessages, []);
 
           // When no tools, tools field should not be present
@@ -515,14 +515,14 @@ describe('Property 4: 请求消息组装格式正确性', () => {
     );
   });
 
-  it('Validates: Requirements 2.6 - request body contains messages array with role and content', () => {
-    fc.assert(
-      fc.property(
+  it('Validates: Requirements 2.6 - request body contains messages array with role and content', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.array(messageArb, { minLength: 1, maxLength: 10 }),
         fc.array(toolDefinitionArb, { minLength: 0, maxLength: 5 }),
-        (messages, tools) => {
+        async (messages, tools) => {
           const client = new LLMClient(defaultConfig);
-          const openAIMessages = client.convertMessages(messages);
+          const openAIMessages = await client.convertMessages(messages);
           const openAITools = client.convertTools(tools);
           const requestBody = client.buildRequestBody(openAIMessages, openAITools);
 

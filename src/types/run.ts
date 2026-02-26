@@ -1,9 +1,13 @@
 import type { ToolCall } from './tools.js';
+import type { ContentBlock } from './messages.js';
 
 export type RunStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export interface AgentRequest {
-  message: string;
+  /** Plain text message (one of message/content) */
+  message?: string;
+  /** Multimodal content block array (one of message/content) */
+  content?: ContentBlock[];
   idempotencyKey: string;
 }
 

@@ -419,9 +419,12 @@ describe('Property 19: 上下文优先级排序', () => {
           { minLength: 2, maxLength: 6 }
         ),
         (chunkData) => {
-          // Ensure distinct scores
+          // Ensure distinct scores and distinct content strings
+          // (indexOf finds the first occurrence, so duplicate content would give same position)
           const uniqueScores = new Set(chunkData.map(([, , s]) => s));
           fc.pre(uniqueScores.size >= 2);
+          const uniqueContents = new Set(chunkData.map(([, c]) => c));
+          fc.pre(uniqueContents.size === chunkData.length);
 
           const chunks: ContextPriority[] = chunkData.map(([id, content, score]) => ({
             chunk: makeChunk(id, content),

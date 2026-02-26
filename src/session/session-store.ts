@@ -74,7 +74,9 @@ export class SessionStore {
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
           messageCount: session.conversationHistory.length,
-          lastMessage: lastMsg?.content,
+          lastMessage: Array.isArray(lastMsg?.content)
+            ? `[multimodal: ${lastMsg.content.length} blocks]`
+            : lastMsg?.content,
         });
       } catch {
         // skip corrupt files

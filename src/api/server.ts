@@ -8,6 +8,8 @@ import { BearerTokenAuth } from './middleware/auth.js';
 import { CORSMiddleware } from './middleware/cors.js';
 import { SSEStreamManager } from './sse/sse-stream.js';
 import type { AgentRequest } from '../types/run.js';
+import type { ContentBlock } from '../types/messages.js';
+import { ContentValidator } from '../multimodal/content-validator.js';
 
 export interface ServerOptions {
   port: number;
@@ -119,9 +121,10 @@ export class HTTPAPIServer {
 
     // POST /api/sessions/:sessionId/agent — submit agent request (202 + runId)
     // Accepts Idempotency-Key from header OR body.idempotencyKey. Requirements: 12.1, 13.1, 13.2
+    // Accepts content?: ContentBlock[] as alternative to message. Requirements: 3.1–3.7
     this.fastify.post<{
       Params: { sessionId: string };
-      Body: { message: string; idempotencyKey?: string };
+      Body: { message?: string; content?: ContentBlock[]; idempotencyKey?: string };
     }>('/api/sessions/:sessionId/agent', async (request, reply) => {
       const idempotencyKey =
         (request.headers as Record<string, string | undefined>)['idempotency-key'] ??
@@ -134,9 +137,40 @@ export class HTTPAPIServer {
         });
       }
 
-      const { message } = request.body ?? {};
-      if (!message) {
-        return reply.code(400).send({ error: 'Bad Request', message: 'message is required' });
+      const { message, content } = request.body ?? {};
+
+      // Req 3.6: both message and content missing → 400
+      if (!message && !content) {
+        return reply.code(400).send({ error: 'Bad Request', message: 'message or content is required' });
+      }
+
+      // Req 3.2, 3.3: validate content blocks if present
+      if (content) {
+        const validator = new ContentValidator();
+        const validation = validator.validateBlocks(content);
+        if (!validation.valid) {
+          return reply.code(400).send({ error: 'Bad Request', message: validation.error });
+        }
+
+        // Req 3.4: ImageBlock base64 > 5MB → 413
+        const MB5 = 5 * 1024 * 1024;
+        const MB10 = 10 * 1024 * 1024;
+        for (const block of content) {
+          if (block.type === 'image' && block.data) {
+            // base64 encodes 3 bytes as 4 chars; decoded size ≈ data.length * 3/4
+            const decodedSize = Math.floor(block.data.length * 3 / 4);
+            if (decodedSize > MB5) {
+              return reply.code(413).send({ error: 'Payload Too Large', message: 'Image data exceeds maximum size of 5MB' });
+            }
+          }
+          // Req 3.5: FileBlock base64 > 10MB → 413
+          if (block.type === 'file' && block.data) {
+            const decodedSize = Math.floor(block.data.length * 3 / 4);
+            if (decodedSize > MB10) {
+              return reply.code(413).send({ error: 'Payload Too Large', message: 'File data exceeds maximum size of 10MB' });
+            }
+          }
+        }
       }
 
       // Two-layer idempotency check
@@ -156,7 +190,10 @@ export class HTTPAPIServer {
       }
 
       // New request — submit run and enqueue for serial session execution
-      const agentRequest: AgentRequest = { message, idempotencyKey };
+      // Req 3.1, 3.7: pass content or message to AgentRequest
+      const agentRequest: AgentRequest = content
+        ? { content, idempotencyKey }
+        : { message, idempotencyKey };
       const run = runManager.submit(request.params.sessionId, agentRequest);
 
       // Record the runId in the idempotency store so in_flight retries can find it
@@ -272,7 +309,7 @@ export class HTTPAPIServer {
     });
 
     try {
-      for await (const chunk of orchestrator.processMessage(request.message)) {
+      for await (const chunk of orchestrator.processMessage(request.message ?? request.content!)) {
         if (chunk.type === 'text' && chunk.content) {
           this.sseManager.pushEvent(runId, {
             event: 'text_delta',
