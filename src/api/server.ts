@@ -114,17 +114,19 @@ export class HTTPAPIServer {
     );
 
     // POST /api/sessions/:sessionId/agent — submit agent request (202 + runId)
-    // Requires Idempotency-Key header. Requirements: 12.1, 13.1, 13.2
+    // Accepts Idempotency-Key from header OR body.idempotencyKey. Requirements: 12.1, 13.1, 13.2
     this.fastify.post<{
       Params: { sessionId: string };
-      Body: { message: string };
+      Body: { message: string; idempotencyKey?: string };
     }>('/api/sessions/:sessionId/agent', async (request, reply) => {
-      const idempotencyKey = (request.headers as Record<string, string | undefined>)['idempotency-key'];
+      const idempotencyKey =
+        (request.headers as Record<string, string | undefined>)['idempotency-key'] ??
+        request.body?.idempotencyKey;
 
       if (!idempotencyKey) {
         return reply.code(400).send({
           error: 'Bad Request',
-          message: 'Idempotency-Key header is required',
+          message: 'Idempotency-Key is required (header or body.idempotencyKey)',
         });
       }
 
@@ -246,16 +248,17 @@ export class HTTPAPIServer {
    * Called by RunManager's handler — guaranteed serial per session.
    * The run is already in 'running' state when this is called (enqueueRun transitions it).
    * Idempotency is marked complete/failed here — after the run actually finishes.
+   * Persists conversation history to session after each run (P2-1 fix).
    * Requirements: 12.2, 13.4, 13.6
    */
   private async executeRun(
     runId: string,
-    _sessionId: string,
+    sessionId: string,
     request: AgentRequest,
     idempotencyKey: string,
     orchestrator: OrchestratorAgent,
   ): Promise<void> {
-    const { idempotencyStore } = this.options;
+    const { idempotencyStore, sessionStore } = this.options;
 
     // The run is already in 'running' state (enqueueRun transitioned it).
     // Just push the status event.
@@ -292,6 +295,16 @@ export class HTTPAPIServer {
 
       // Mark idempotency complete only after the run has actually finished
       idempotencyStore.complete(idempotencyKey, { runId, status: 'completed' });
+
+      // Persist conversation history back to session (P2-1 fix)
+      try {
+        const session = await sessionStore.load(sessionId);
+        session.conversationHistory = orchestrator.getConversationHistory();
+        session.updatedAt = Date.now();
+        await sessionStore.save(session);
+      } catch {
+        // Non-fatal: session may not exist (e.g. created in-memory only)
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       this.sseManager.pushEvent(runId, {

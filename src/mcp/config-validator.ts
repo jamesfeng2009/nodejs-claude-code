@@ -1,5 +1,5 @@
-import { MCPConfig } from './types';
-import { AppError, ErrorCode } from '../types/errors';
+import { MCPConfig } from './types.js';
+import { AppError, ErrorCode } from '../types/errors.js';
 
 export class ConfigValidator {
   static validate(config: MCPConfig): void {

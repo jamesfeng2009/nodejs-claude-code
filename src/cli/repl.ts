@@ -1,6 +1,7 @@
 import readline from 'readline';
 import type { OrchestratorAgent } from '../agent/orchestrator.js';
 import type { StreamingRenderer } from './streaming-renderer.js';
+import type { ShellConfirmFn } from '../tools/implementations/shell-execute.js';
 
 /**
  * Interactive REPL for the CLI application.
@@ -14,6 +15,25 @@ export class REPL {
     private readonly orchestrator: OrchestratorAgent,
     private readonly renderer: StreamingRenderer,
   ) {}
+
+  /**
+   * Returns a ShellConfirmFn that prompts the user via readline (y/n).
+   * Inject this into createShellExecuteTool() so shell commands are usable in CLI mode.
+   */
+  createShellConfirmFn(): ShellConfirmFn {
+    return (command: string): Promise<boolean> => {
+      return new Promise((resolve) => {
+        if (!this.rl) {
+          resolve(false);
+          return;
+        }
+        this.rl.question(`\nAllow shell command? [y/N]\n  $ ${command}\n> `, (answer) => {
+          resolve(answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes');
+          this.rl?.setPrompt('> ');
+        });
+      });
+    };
+  }
 
   /**
    * Start the REPL loop using Node.js readline.
@@ -102,6 +122,7 @@ export class REPL {
 
   /**
    * Gracefully close the readline interface and print a goodbye message.
+   * Does NOT call process.exit() — the caller (index.ts) is responsible for cleanup and exit.
    */
   async shutdown(): Promise<void> {
     if (this.isShuttingDown) return;
@@ -109,6 +130,5 @@ export class REPL {
 
     console.log('\nGoodbye!');
     this.rl?.close();
-    process.exit(0);
   }
 }

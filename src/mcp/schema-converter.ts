@@ -1,5 +1,5 @@
-import { MCPToolDefinition } from './types';
-import { ToolDefinition } from '../types/tools';
+import { MCPToolDefinition } from './types.js';
+import { ToolDefinition } from '../types/tools.js';
 
 export class SchemaConverter {
   static toToolDefinition(

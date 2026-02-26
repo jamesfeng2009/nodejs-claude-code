@@ -101,20 +101,23 @@ export class DependencyGraph {
  * e.g. fromFile="src/a/b.ts", importSource="./c" → "src/a/c.ts"
  *
  * Handles:
- * - Bare relative paths (./c → src/a/c.ts)
+ * - Bare relative paths (./c → src/a/c.ts or src/a/c.tsx or src/a/c/index.ts etc.)
  * - Already-extensioned paths (./c.js → src/a/c.ts, normalised to .ts)
  * - Index imports (./utils → src/a/utils/index.ts if no extension)
+ *
+ * Returns the most likely resolved path. Prefers .ts over .tsx for simplicity;
+ * callers that need exact resolution should stat the filesystem.
  */
 function resolveRelativeImport(fromFile: string, importSource: string): string | null {
   if (!importSource.startsWith('.')) return null;
 
   // Strip known JS/TS extensions from the import source so we can normalise
-  const stripped = importSource.replace(/\.(js|mjs|cjs|ts|mts|cts)$/, '');
+  const stripped = importSource.replace(/\.(js|mjs|cjs|jsx|ts|mts|cts|tsx)$/, '');
 
   // Get directory of the source file
   const parts = fromFile.split('/');
   parts.pop(); // remove filename
-  const dir = parts;
+  const dir = [...parts];
 
   // Resolve the relative path segments
   const importParts = stripped.split('/');
@@ -126,6 +129,15 @@ function resolveRelativeImport(fromFile: string, importSource: string): string |
     }
   }
 
-  // Append .ts extension (project uses TypeScript source paths internally)
-  return dir.join('/') + '.ts';
+  const base = dir.join('/');
+
+  // If the original import already had a TS/TSX extension, use it directly
+  if (/\.(tsx|jsx)$/.test(importSource)) {
+    return base + '.tsx';
+  }
+
+  // Prefer .ts; fall back candidates are .tsx and index variants.
+  // We return .ts as the canonical form — the dependency graph is used for
+  // heuristic context expansion, not strict module resolution.
+  return base + '.ts';
 }

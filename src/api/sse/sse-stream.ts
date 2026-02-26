@@ -112,10 +112,20 @@ export class SSEStreamManager {
   }
 
   private formatEvent(event: SSEEvent): string {
+    const dataPayload: Record<string, unknown> = {
+      seq: event.seq,
+      timestamp: event.timestamp,
+    };
+    // Safely merge event.data only if it's a plain object
+    if (event.data !== null && typeof event.data === 'object' && !Array.isArray(event.data)) {
+      Object.assign(dataPayload, event.data);
+    } else if (event.data !== undefined) {
+      dataPayload['data'] = event.data;
+    }
     return [
       `id: ${event.id}`,
       `event: ${event.event}`,
-      `data: ${JSON.stringify({ seq: event.seq, timestamp: event.timestamp, ...((event.data as object) ?? {}) })}`,
+      `data: ${JSON.stringify(dataPayload)}`,
       '',
       '',
     ].join('\n');

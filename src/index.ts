@@ -66,7 +66,8 @@ async function main(): Promise<void> {
   toolRegistry.register(createFileReadTool(workDir));
   toolRegistry.register(createFileWriteTool(workDir));
   toolRegistry.register(createFileEditTool(workDir));
-  toolRegistry.register(createShellExecuteTool(workDir));
+  // shell_execute is registered later: in CLI mode with a REPL confirm fn,
+  // in HTTP mode with the default deny confirm (no interactive UI available).
   toolRegistry.register(createGrepSearchTool(workDir));
   toolRegistry.register(createListDirectoryTool(workDir));
 
@@ -128,6 +129,8 @@ async function main(): Promise<void> {
 
   if (httpMode) {
     // ── HTTP API Server mode (P1-9 fix) ──────────────────────────────────
+    // In HTTP mode there is no interactive UI, so shell commands are denied by default.
+    toolRegistry.register(createShellExecuteTool(workDir));
     const runManager = new RunManager();
     const sseManager = new SSEStreamManager();
     const snapshotManager = new StateSnapshotManager(sessionStore, runManager, sseManager);
@@ -163,6 +166,11 @@ async function main(): Promise<void> {
     // ── CLI REPL mode ─────────────────────────────────────────────────────
     const renderer = new StreamingRenderer();
     const repl = new REPL(orchestrator, renderer);
+
+    // Wire up shell confirmation so the LLM can execute shell commands in CLI mode.
+    // The confirm fn prompts the user inline via readline (y/N).
+    toolRegistry.register(createShellExecuteTool(workDir, repl.createShellConfirmFn()));
+
     await repl.start();
     await mcpManager.shutdown();
     process.exit(0);

@@ -23,6 +23,10 @@ export function createFileEditTool(workDir: string): Tool {
             type: 'string',
             description: 'The replacement text',
           },
+          replace_all: {
+            type: 'boolean',
+            description: 'Replace all occurrences (default: false, replaces only the first)',
+          },
         },
         required: ['path', 'old_text', 'new_text'],
       },
@@ -31,6 +35,7 @@ export function createFileEditTool(workDir: string): Tool {
       const filePath = args['path'] as string;
       const oldText = args['old_text'] as string;
       const newText = args['new_text'] as string;
+      const replaceAll = (args['replace_all'] as boolean | undefined) ?? false;
       const absPath = resolve(workDir, filePath);
 
       if (!isWithinWorkDir(absPath, workDir)) {
@@ -56,12 +61,23 @@ export function createFileEditTool(workDir: string): Tool {
           };
         }
 
-        const updated = original.replace(oldText, () => newText);
+        // Count occurrences so we can report how many were replaced
+        let count = 0;
+        let updated: string;
+        if (replaceAll) {
+          // Replace all occurrences using a global split/join (avoids regex escaping issues)
+          const parts = original.split(oldText);
+          count = parts.length - 1;
+          updated = parts.join(newText);
+        } else {
+          updated = original.replace(oldText, () => { count = 1; return newText; });
+        }
+
         writeFileSync(absPath, updated, 'utf-8');
 
         return {
           toolCallId: '',
-          content: `${warning}Successfully edited '${filePath}'`,
+          content: `${warning}Successfully edited '${filePath}' (${count} replacement${count !== 1 ? 's' : ''})`,
           isError: false,
         };
       } catch (err) {

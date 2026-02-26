@@ -30,6 +30,13 @@ export class OrchestratorAgent {
   }
 
   /**
+   * Returns the current conversation history (for session persistence).
+   */
+  getConversationHistory() {
+    return this.conversationManager.getMessages();
+  }
+
+  /**
    * Public entry point: process a user message and stream response chunks.
    * Validates: Requirements 1.2, 5.1
    */

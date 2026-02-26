@@ -279,7 +279,8 @@ export class LLMClient {
                   const existing = toolCallBuffers.get(idx);
                   if (existing) {
                     if (toolCallDelta.function?.name) {
-                      existing.name += toolCallDelta.function.name;
+                      // Some providers send name in continuation deltas — ignore to avoid duplication
+                      // (OpenAI-compatible streams only send name in the first delta)
                     }
                     if (toolCallDelta.function?.arguments) {
                       existing.argsBuffer += toolCallDelta.function.arguments;

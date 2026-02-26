@@ -1,4 +1,4 @@
-import { MCPConfig } from '../mcp/types';
+import { MCPConfig } from '../mcp/types.js';
 
 export interface AppConfig {
   llm: {
