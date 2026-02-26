@@ -19,6 +19,12 @@ export class BearerTokenAuth {
     reply: { code: (status: number) => { send: (body: unknown) => void } },
     done: (err?: Error) => void,
   ): void => {
+    // If no tokens are configured, auth is disabled — allow all requests.
+    if (this.validTokens.size === 0) {
+      done();
+      return;
+    }
+
     const authHeader = request.headers['authorization'];
     const headerValue = Array.isArray(authHeader) ? authHeader[0] : authHeader;
 

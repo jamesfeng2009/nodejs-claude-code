@@ -19,6 +19,8 @@ export interface ServerOptions {
   snapshotManager: StateSnapshotManager;
   idempotencyStore: IdempotencyStore;
   orchestrator: OrchestratorAgent;
+  /** Shared SSEStreamManager instance — must be the same one passed to StateSnapshotManager */
+  sseManager: SSEStreamManager;
 }
 
 /**
@@ -38,7 +40,9 @@ export class HTTPAPIServer {
     this.fastify = Fastify({ logger: false });
     this.auth = new BearerTokenAuth(options.validTokens);
     this.cors = new CORSMiddleware(options.allowedOrigins);
-    this.sseManager = new SSEStreamManager();
+    // Use the shared sseManager injected from outside — must be the same instance
+    // passed to StateSnapshotManager so getCurrentSeq() reads accurate event counts.
+    this.sseManager = options.sseManager;
 
     // Wire the run handler so RunManager drives serial execution per session.
     // NOTE: executeRun does NOT call transitionState('running') itself —
@@ -199,7 +203,7 @@ export class HTTPAPIServer {
             this.sseManager.subscribe(runId, reply.raw);
             this.sseManager.pushEvent(runId, {
               event: 'state_summary',
-              data: summary,
+              data: { summary },
             });
             this.sseManager.closeStream(runId);
           } else {
@@ -274,15 +278,26 @@ export class HTTPAPIServer {
             event: 'text_delta',
             data: { content: chunk.content },
           });
-        } else if (chunk.type === 'tool_call_start') {
+        } else if (chunk.type === 'tool_call_start' && chunk.toolCall?.id && chunk.toolCall.name) {
           this.sseManager.pushEvent(runId, {
             event: 'tool_call_start',
-            data: { toolCall: chunk.toolCall },
+            data: {
+              toolCall: {
+                id: chunk.toolCall.id,
+                name: chunk.toolCall.name,
+                arguments: chunk.toolCall.arguments ?? {},
+              },
+            },
           });
-        } else if (chunk.type === 'tool_call_end') {
+        } else if (chunk.type === 'tool_call_end' && chunk.toolCall?.id && chunk.toolCall.name) {
           this.sseManager.pushEvent(runId, {
             event: 'tool_call_result',
-            data: { toolCall: chunk.toolCall },
+            data: {
+              toolCall: {
+                id: chunk.toolCall.id,
+                name: chunk.toolCall.name,
+              },
+            },
           });
         }
       }

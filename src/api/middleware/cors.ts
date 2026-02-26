@@ -32,11 +32,16 @@ export class CORSMiddleware {
       const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
 
       if (origin) {
-        if (this.allowedOrigins.has(origin)) {
-          reply.header('Access-Control-Allow-Origin', origin);
+        // If allowedOrigins is empty, allow all origins (open mode).
+        const allowed = this.allowedOrigins.size === 0 || this.allowedOrigins.has(origin);
+        if (allowed) {
+          const responseOrigin = this.allowedOrigins.size === 0 ? '*' : origin;
+          reply.header('Access-Control-Allow-Origin', responseOrigin);
           reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
           reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key');
-          reply.header('Access-Control-Allow-Credentials', 'true');
+          if (this.allowedOrigins.size > 0) {
+            reply.header('Access-Control-Allow-Credentials', 'true');
+          }
 
           if (request.method === 'OPTIONS') {
             reply.code(204).send();

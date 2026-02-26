@@ -153,9 +153,14 @@ export class OrchestratorAgent {
       // Requirements 3.10: each result is a role="tool" message with the matching toolCallId.
       for (const toolCall of pendingToolCalls) {
         const toolResult = await this.toolRegistry.execute(toolCall);
+        // Compress large tool outputs before storing in conversation history (P0-3 fix).
+        const compressedContent = this.contextManager.compressToolOutput(
+          toolResult.content,
+          toolCall.name,
+        );
         const toolResultMsg: Message = {
           role: 'tool',
-          content: toolResult.content,
+          content: compressedContent,
           toolCallId: toolResult.toolCallId,
           name: toolCall.name,
           timestamp: Date.now(),

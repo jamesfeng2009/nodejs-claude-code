@@ -43,8 +43,8 @@ export function createShellExecuteTool(
       if (!confirmed) {
         return {
           toolCallId: '',
-          content: `Command execution cancelled by user: ${command}`,
-          isError: false,
+          content: `[cancelled] Command execution was not confirmed: ${command}`,
+          isError: true,
         };
       }
 

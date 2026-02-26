@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { ServerResponse } from 'http';
-import type { SSEEvent } from '../../types/sse.js';
+import type { SSEEvent, SSEEventData } from '../../types/sse.js';
 import type { RunStateSummary } from '../../types/run.js';
 
 interface StreamState {
@@ -46,7 +46,7 @@ export class SSEStreamManager {
    */
   pushEvent(
     runId: string,
-    event: Omit<SSEEvent, 'id' | 'seq' | 'timestamp'>,
+    event: { event: SSEEvent['event']; data: SSEEventData },
   ): SSEEvent {
     const stream = this.streams.get(runId) ?? { seq: 0, subscribers: new Set<ServerResponse>() };
     stream.seq++;
@@ -81,7 +81,7 @@ export class SSEStreamManager {
     this.subscribe(runId, res);
     this.pushEvent(runId, {
       event: 'state_summary',
-      data: stateSummary,
+      data: { summary: stateSummary },
     });
   }
 

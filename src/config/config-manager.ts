@@ -5,7 +5,9 @@ import type { AppConfig } from '../types/config.js';
 
 const DEFAULT_CONFIG: AppConfig = {
   llm: {
-    baseUrl: 'https://api.openai.com/v1',
+    // Default to Anthropic endpoint — matches the default Claude model below.
+    // Users targeting OpenAI-compatible APIs should set baseUrl explicitly.
+    baseUrl: 'https://api.anthropic.com',
     apiKey: '',
     model: 'claude-3-5-sonnet-20241022',
     maxTokens: 8192,

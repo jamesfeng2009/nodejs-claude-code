@@ -177,11 +177,14 @@ export class HybridRetriever {
    * Expand results by including chunks from dependency files.
    * For each hit chunk, look up its file's dependencies and include
    * relevant chunks from those files.
+   * Limits total results to topK * 2 to avoid prompt bloat in large projects (P1-4 fix).
    */
   expandWithDependencyChunks(chunks: ScoredChunk[]): ScoredChunk[] {
     const allChunks = this.vectorStore.getAllChunks();
     const resultIds = new Set(chunks.map((c) => c.chunk.id));
     const toAdd: ScoredChunk[] = [];
+    // Cap: at most topK extra chunks from dependency expansion
+    const maxExtra = this.topK;
 
     // Collect all dependency files for hit chunks
     const depFiles = new Set<string>();
@@ -192,10 +195,12 @@ export class HybridRetriever {
       }
     }
 
-    // Add chunks from dependency files (first chunk of each dep file as representative)
+    // Add chunks from dependency files, respecting the cap
     for (const depFile of depFiles) {
+      if (toAdd.length >= maxExtra) break;
       const depChunks = allChunks.filter((c) => c.metadata.filePath === depFile);
       for (const depChunk of depChunks) {
+        if (toAdd.length >= maxExtra) break;
         if (!resultIds.has(depChunk.id)) {
           resultIds.add(depChunk.id);
           toAdd.push({

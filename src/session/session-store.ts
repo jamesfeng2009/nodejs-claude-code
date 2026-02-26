@@ -1,13 +1,23 @@
 import { mkdir, readFile, writeFile, unlink, readdir } from 'fs/promises';
-import { join } from 'path';
+import { join, isAbsolute } from 'path';
 import { randomUUID } from 'crypto';
 import type { Session, SessionSummary } from '../types/session.js';
 
+export interface SessionStoreOptions {
+  /** Storage path relative to workDir (or absolute). Defaults to '.ai-assistant/sessions'. */
+  storagePath?: string;
+  /** Sessions older than this many days are removed by cleanExpired(). Defaults to 30. */
+  expirationDays?: number;
+}
+
 export class SessionStore {
   private readonly sessionsDir: string;
+  private readonly expirationDays: number;
 
-  constructor(workDir: string = process.cwd()) {
-    this.sessionsDir = join(workDir, '.ai-assistant', 'sessions');
+  constructor(workDir: string = process.cwd(), options: SessionStoreOptions = {}) {
+    const storagePath = options.storagePath ?? '.ai-assistant/sessions';
+    this.sessionsDir = isAbsolute(storagePath) ? storagePath : join(workDir, storagePath);
+    this.expirationDays = options.expirationDays ?? 30;
   }
 
   /** Creates a new session with a unique sessionId (UUID v4). */
@@ -80,9 +90,9 @@ export class SessionStore {
   }
 
   /**
-   * Removes sessions older than maxAgeDays (default 30) based on updatedAt.
+   * Removes sessions older than expirationDays (from constructor config) based on updatedAt.
    */
-  async cleanExpired(maxAgeDays: number = 30): Promise<void> {
+  async cleanExpired(maxAgeDays: number = this.expirationDays): Promise<void> {
     let entries: string[];
     try {
       entries = await readdir(this.sessionsDir);

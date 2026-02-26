@@ -9,6 +9,9 @@ interface DirEntry {
   size?: number;
 }
 
+/** Directories that are always skipped during traversal (P1-7 fix). */
+const ALWAYS_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage']);
+
 function listDir(absDir: string, workDir: string, depth: number, maxDepth: number): string[] {
   const lines: string[] = [];
 
@@ -20,6 +23,7 @@ function listDir(absDir: string, workDir: string, depth: number, maxDepth: numbe
   }
 
   for (const entry of entries) {
+    if (ALWAYS_SKIP_DIRS.has(entry)) continue; // hard-deny noisy dirs (P1-7 fix)
     const fullPath = join(absDir, entry);
     const relPath = relative(workDir, fullPath);
     let stat;

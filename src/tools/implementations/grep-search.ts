@@ -9,6 +9,9 @@ interface SearchMatch {
   content: string;
 }
 
+/** Directories that are always skipped during traversal (P1-7 fix). */
+const ALWAYS_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage']);
+
 function searchDirectory(
   dir: string,
   pattern: RegExp,
@@ -30,6 +33,7 @@ function searchDirectory(
     for (const entry of entries) {
       if (matches.length >= maxResults) break;
       if (entry.startsWith('.')) continue; // skip hidden files/dirs
+      if (ALWAYS_SKIP_DIRS.has(entry)) continue; // hard-deny noisy dirs
 
       const fullPath = join(currentDir, entry);
       let stat;

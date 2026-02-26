@@ -70,18 +70,22 @@ export class DependencyGraph {
   /**
    * Build a DependencyGraph from a set of chunks by analysing their
    * import/require metadata.
+   * Uses multi-candidate resolution to handle index.ts and .tsx variants (P1-5 fix).
    */
   static buildFromChunks(chunks: Chunk[]): DependencyGraph {
     const graph = new DependencyGraph();
+    // Build a set of known file paths for candidate resolution
+    const knownFiles = new Set(chunks.map((c) => c.metadata.filePath));
 
     for (const chunk of chunks) {
       const fromFile = chunk.metadata.filePath;
 
       for (const imp of chunk.metadata.imports) {
-        if (!imp.isRelative) continue; // Only track relative (project-internal) imports
+        if (!imp.isRelative) continue;
 
-        // Resolve the import source relative to the chunk's file
-        const toFile = resolveRelativeImport(fromFile, imp.source);
+        // Try each candidate in preference order; use the first known file
+        const candidates = resolveRelativeImportCandidates(fromFile, imp.source);
+        const toFile = candidates.find((c) => knownFiles.has(c)) ?? candidates[0];
         if (!toFile) continue;
 
         graph.addEdge({
@@ -101,12 +105,14 @@ export class DependencyGraph {
  * e.g. fromFile="src/a/b.ts", importSource="./c" → "src/a/c.ts"
  *
  * Handles:
- * - Bare relative paths (./c → src/a/c.ts or src/a/c.tsx or src/a/c/index.ts etc.)
+ * - Bare relative paths (./c → src/a/c.ts or src/a/c/index.ts)
  * - Already-extensioned paths (./c.js → src/a/c.ts, normalised to .ts)
  * - Index imports (./utils → src/a/utils/index.ts if no extension)
+ * - .tsx / .jsx extensions
  *
- * Returns the most likely resolved path. Prefers .ts over .tsx for simplicity;
- * callers that need exact resolution should stat the filesystem.
+ * Returns an array of candidate paths in preference order.
+ * Callers should use the first candidate that exists on disk, or the first
+ * one for heuristic purposes.
  */
 function resolveRelativeImport(fromFile: string, importSource: string): string | null {
   if (!importSource.startsWith('.')) return null;
@@ -131,13 +137,44 @@ function resolveRelativeImport(fromFile: string, importSource: string): string |
 
   const base = dir.join('/');
 
-  // If the original import already had a TS/TSX extension, use it directly
+  // If the original import already had a TSX/JSX extension, use it directly
   if (/\.(tsx|jsx)$/.test(importSource)) {
     return base + '.tsx';
   }
 
-  // Prefer .ts; fall back candidates are .tsx and index variants.
-  // We return .ts as the canonical form — the dependency graph is used for
-  // heuristic context expansion, not strict module resolution.
+  // Return .ts as the canonical form for heuristic dependency expansion.
+  // The dependency graph is used for context expansion, not strict module resolution.
+  // Callers that need exact resolution should also check base/index.ts.
   return base + '.ts';
+}
+
+/**
+ * Returns all candidate resolved paths for a relative import, in preference order:
+ * 1. base.ts
+ * 2. base.tsx
+ * 3. base/index.ts
+ * 4. base/index.tsx
+ *
+ * Useful when the caller wants to stat the filesystem for exact resolution.
+ */
+export function resolveRelativeImportCandidates(fromFile: string, importSource: string): string[] {
+  if (!importSource.startsWith('.')) return [];
+
+  const stripped = importSource.replace(/\.(js|mjs|cjs|jsx|ts|mts|cts|tsx)$/, '');
+  const parts = fromFile.split('/');
+  parts.pop();
+  const dir = [...parts];
+
+  for (const part of stripped.split('/')) {
+    if (part === '..') dir.pop();
+    else if (part !== '.') dir.push(part);
+  }
+
+  const base = dir.join('/');
+
+  if (/\.(tsx|jsx)$/.test(importSource)) {
+    return [base + '.tsx', base + '/index.tsx'];
+  }
+
+  return [base + '.ts', base + '.tsx', base + '/index.ts', base + '/index.tsx'];
 }

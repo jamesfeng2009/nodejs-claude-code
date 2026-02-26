@@ -63,7 +63,19 @@ export class ToolRegistry {
       return { valid: false, errors: ['Arguments must be an object'] };
     }
 
-    validateObject(args as Record<string, unknown>, schema.properties, schema.required, '', errors);
+    const argsObj = args as Record<string, unknown>;
+
+    // Reject unknown top-level keys — the top-level parameters schema should
+    // only contain declared properties (P1-6 fix).
+    if (schema.properties) {
+      for (const key of Object.keys(argsObj)) {
+        if (!(key in schema.properties)) {
+          errors.push(`Unknown argument: ${key}`);
+        }
+      }
+    }
+
+    validateObject(argsObj, schema.properties, schema.required, '', errors);
 
     return { valid: errors.length === 0, errors };
   }

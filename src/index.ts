@@ -125,7 +125,12 @@ async function main(): Promise<void> {
   );
 
   // ── Session store ─────────────────────────────────────────────────────────
-  const sessionStore = new SessionStore(workDir);
+  const sessionStore = new SessionStore(workDir, {
+    storagePath: config.session.storagePath,
+    expirationDays: config.session.expirationDays,
+  });
+  // Clean up expired sessions on startup (non-fatal)
+  sessionStore.cleanExpired().catch(() => {});
 
   if (httpMode) {
     // ── HTTP API Server mode (P1-9 fix) ──────────────────────────────────
@@ -135,6 +140,12 @@ async function main(): Promise<void> {
     const sseManager = new SSEStreamManager();
     const snapshotManager = new StateSnapshotManager(sessionStore, runManager, sseManager);
     const idempotencyStore = new IdempotencyStore(config.idempotency.ttlMs);
+    // Periodically clean expired idempotency records (every hour)
+    const idempotencyCleanupTimer = setInterval(
+      () => idempotencyStore.cleanExpired(),
+      60 * 60 * 1000,
+    );
+    idempotencyCleanupTimer.unref(); // don't block process exit
 
     // Bearer token: wrap single string into array for BearerTokenAuth
     const validTokens = config.httpApi.bearerToken ? [config.httpApi.bearerToken] : [];
@@ -149,6 +160,7 @@ async function main(): Promise<void> {
       snapshotManager,
       idempotencyStore,
       orchestrator,
+      sseManager,  // shared instance — same one used by StateSnapshotManager
     });
 
     // Register shutdown handlers before starting the server

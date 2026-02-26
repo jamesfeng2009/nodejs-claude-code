@@ -57,6 +57,8 @@ export class ConversationManager {
   /**
    * Check if compression is needed and compress if so.
    * Compression reduces token count from highWaterMark to lowWaterMark.
+   * Applies differentiated compression: compressible tool results are summarised
+   * before the sliding-window pass, reducing token pressure (req 4.15).
    */
   async compressIfNeeded(): Promise<void> {
     if (this.getTokenCount() < this.config.highWaterMark) {
@@ -65,7 +67,22 @@ export class ConversationManager {
 
     // Separate system messages (always keep) from the rest
     const systemMessages = this.messages.filter((m) => m.role === 'system');
-    const nonSystemMessages = this.messages.filter((m) => m.role !== 'system');
+    let nonSystemMessages = this.messages.filter((m) => m.role !== 'system');
+
+    // ── Differentiated tool-result compression (req 4.15) ────────────────
+    // Summarise compressible tool results in-place before the sliding-window pass.
+    // Error results and user-confirmed operations are left untouched.
+    nonSystemMessages = nonSystemMessages.map((msg) => {
+      if (!this.shouldCompressToolResult(msg)) return msg;
+      const lines = msg.content.split('\n');
+      if (lines.length <= 10) return msg; // already short, skip
+      const head = lines.slice(0, 6).join('\n');
+      const omitted = lines.length - 6;
+      return {
+        ...msg,
+        content: `${head}\n... [${omitted} lines summarised during compression] ...`,
+      };
+    });
 
     // Build a compact summary of ALL non-system messages
     const summary = this.generateStructuredSummary(nonSystemMessages);
@@ -212,32 +229,26 @@ export class ConversationManager {
   // ─── Private helpers ────────────────────────────────────────────────────────
 
   private buildSummaryMessage(summary: StructuredSummary): Message {
-    // Build a compact single-line summary to minimize token usage
-    const parts: string[] = [];
+    // Build a structured multi-section summary so key information is readable
+    // and not lost in a single-line concatenation.
+    const parts: string[] = ['[Conversation Summary]'];
 
     if (summary.keyEntities.length > 0) {
-      // Limit to first 5 entities, truncate each to 30 chars
-      const entities = summary.keyEntities.slice(0, 5).map((e) => e.slice(0, 30));
-      parts.push(`entities:${entities.join(',')}`);
+      parts.push(`Key entities: ${summary.keyEntities.slice(0, 10).join(', ')}`);
     }
     if (summary.decisions.length > 0) {
-      const decisions = summary.decisions.slice(0, 3).map((d) => d.slice(0, 30));
-      parts.push(`decisions:${decisions.join(',')}`);
+      parts.push(`Decisions: ${summary.decisions.slice(0, 5).map((d) => d.slice(0, 80)).join(' | ')}`);
     }
     if (summary.errors.length > 0) {
-      const errors = summary.errors.slice(0, 3).map((e) => e.slice(0, 40));
-      parts.push(`errors:${errors.join(',')}`);
+      parts.push(`Errors: ${summary.errors.slice(0, 5).map((e) => e.slice(0, 100)).join(' | ')}`);
     }
     if (summary.operationHistory.length > 0) {
-      const ops = summary.operationHistory.slice(0, 3).map((o) => o.slice(0, 30));
-      parts.push(`ops:${ops.join(',')}`);
+      parts.push(`Operations: ${summary.operationHistory.slice(0, 8).map((o) => o.slice(0, 60)).join(' | ')}`);
     }
-
-    const content = `[Conversation Summary] ${parts.join('; ')}`;
 
     return {
       role: 'system',
-      content,
+      content: parts.join('\n'),
       timestamp: Date.now(),
     };
   }

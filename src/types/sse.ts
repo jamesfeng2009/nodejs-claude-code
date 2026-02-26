@@ -1,4 +1,4 @@
-import type { ToolResult } from './tools.js';
+import type { ToolCall, ToolResult } from './tools.js';
 import type { RunStatus, RunStateSummary } from './run.js';
 
 export type SSEEventType =
@@ -14,28 +14,52 @@ export interface SSEEvent {
   id: string;
   seq: number;
   event: SSEEventType;
-  data: unknown;
+  data: SSEEventData;
   timestamp: number;
 }
+
+// ── Strict per-event payload types ───────────────────────────────────────────
 
 export interface TextDeltaPayload {
   content: string;
 }
 
-export interface ToolCallPayload {
-  toolCallId: string;
-  toolName: string;
-  args?: Record<string, unknown>;
-  result?: ToolResult;
+export interface ToolCallStartPayload {
+  toolCall: Pick<ToolCall, 'id' | 'name' | 'arguments'>;
+}
+
+export interface ToolCallResultPayload {
+  toolCall: Pick<ToolCall, 'id' | 'name'> & { result?: ToolResult };
 }
 
 export interface RunStatusPayload {
   runId: string;
   status: RunStatus;
-  error?: string;
+}
+
+export interface RunCompletePayload {
+  runId: string;
+  status: 'completed';
+}
+
+export interface RunFailedPayload {
+  runId: string;
+  error: string;
 }
 
 export interface StateSummaryPayload {
-  run: RunStateSummary;
-  sessionMessageCount: number;
+  summary: RunStateSummary;
 }
+
+/**
+ * Discriminated union of all SSE event data shapes.
+ * Clients can switch on the parent SSEEvent.event field to narrow the type.
+ */
+export type SSEEventData =
+  | TextDeltaPayload
+  | ToolCallStartPayload
+  | ToolCallResultPayload
+  | RunStatusPayload
+  | RunCompletePayload
+  | RunFailedPayload
+  | StateSummaryPayload;

@@ -22,10 +22,13 @@ export class SubAgent {
     private readonly task: string,
     private readonly llmClient: LLMClient,
     private readonly toolRegistry: ToolRegistry,
-    _parentContext: ConversationContext,
+    parentContext: ConversationContext,
   ) {
-    // Create a fresh, independent context (copy nothing from parent)
-    this.ownContext = { messages: [] };
+    // Create a fresh, independent context.
+    // Inherit parent system messages (constraints/decisions) so the sub-agent
+    // is aware of key project context, but does NOT inherit conversation history (P1-8 fix).
+    const parentSystemMessages = parentContext.messages.filter((m) => m.role === 'system');
+    this.ownContext = { messages: [...parentSystemMessages] };
   }
 
   /**
@@ -39,7 +42,8 @@ export class SubAgent {
    */
   async execute(): Promise<SubAgentResult> {
     try {
-      // Seed the independent context
+      // Seed the independent context with sub-agent system message + task.
+      // Parent system messages are already in ownContext from the constructor.
       const systemMsg: Message = {
         role: 'system',
         content: 'You are a sub-agent. Complete the assigned task using the available tools.',
@@ -50,7 +54,11 @@ export class SubAgent {
         content: this.task,
         timestamp: Date.now(),
       };
-      this.ownContext.messages.push(systemMsg, taskMsg);
+      // Only prepend sub-agent system message if no parent system messages were inherited
+      if (this.ownContext.messages.length === 0) {
+        this.ownContext.messages.push(systemMsg);
+      }
+      this.ownContext.messages.push(taskMsg);
 
       const tools = this.toolRegistry.getAll().map((t) => t.definition);
       let summaryParts: string[] = [];
