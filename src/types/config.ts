@@ -1,3 +1,5 @@
+import { MCPConfig } from '../mcp/types';
+
 export interface AppConfig {
   llm: {
     apiKey: string;
@@ -41,4 +43,5 @@ export interface AppConfig {
   idempotency: {
     ttlMs: number;
   };
+  mcp?: MCPConfig;
 }

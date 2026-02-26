@@ -33,6 +33,7 @@ import { createGrepSearchTool } from './tools/implementations/grep-search.js';
 import { createListDirectoryTool } from './tools/implementations/list-directory.js';
 import { StreamingRenderer } from './cli/streaming-renderer.js';
 import { REPL } from './cli/repl.js';
+import { MCPManager } from './mcp/manager.js';
 
 async function main(): Promise<void> {
   const workDir = process.cwd();
@@ -68,6 +69,10 @@ async function main(): Promise<void> {
   toolRegistry.register(createShellExecuteTool(workDir));
   toolRegistry.register(createGrepSearchTool(workDir));
   toolRegistry.register(createListDirectoryTool(workDir));
+
+  // ── MCP integration ───────────────────────────────────────────────────────
+  const mcpManager = new MCPManager(config.mcp, toolRegistry);
+  await mcpManager.initialize();
 
   // ── Retrieval stack ───────────────────────────────────────────────────────
   const embeddingEngine = new EmbeddingEngine({
@@ -143,6 +148,15 @@ async function main(): Promise<void> {
       orchestrator,
     });
 
+    // Register shutdown handlers before starting the server
+    const shutdown = async () => {
+      await mcpManager.shutdown();
+      await server.stop();
+      process.exit(0);
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+
     await server.start();
     console.log(`HTTP API server listening on ${config.httpApi.host}:${config.httpApi.port}`);
   } else {
@@ -150,6 +164,8 @@ async function main(): Promise<void> {
     const renderer = new StreamingRenderer();
     const repl = new REPL(orchestrator, renderer);
     await repl.start();
+    await mcpManager.shutdown();
+    process.exit(0);
   }
 }
 
