@@ -34,10 +34,9 @@ export class ContentValidator {
   /**
    * Validates a single ContentBlock.
    * - Checks mimeType is in the supported list
-   * - Checks that exactly one of data/url/mediaId exists (data takes priority over url)
+   * - Checks that exactly one of data/url/mediaId exists
    * - If data exists, validates it is valid base64
-   * - If url exists (ImageBlock only), validates it is HTTP/HTTPS URL
-   * - Rejects FileBlock with url field
+   * - If url exists, validates it is HTTP/HTTPS URL
    */
   validateBlock(block: ContentBlock): ValidationResult {
     if (block.type === 'text') {
@@ -99,26 +98,7 @@ export class ContentValidator {
       return { valid: false, error: `Unsupported image mimeType: ${block.mimeType}` };
     }
 
-    // data takes priority; if data exists, ignore url
-    if (block.data !== undefined) {
-      if (!this.isValidBase64(block.data)) {
-        return { valid: false, error: `Invalid base64 data in image block` };
-      }
-      return { valid: true };
-    }
-
-    if (block.mediaId !== undefined) {
-      return { valid: true };
-    }
-
-    if (block.url !== undefined) {
-      if (!this.isValidHttpUrl(block.url)) {
-        return { valid: false, error: `Invalid URL in image block` };
-      }
-      return { valid: true };
-    }
-
-    return { valid: false, error: `ContentBlock must have either data or url` };
+    return this._validateSourceFields(block.data, block.url, block.mediaId, 'image');
   }
 
   private _validateFileBlock(block: FileBlock): ValidationResult {
@@ -126,25 +106,44 @@ export class ContentValidator {
       return { valid: false, error: `Unsupported file mimeType: ${block.mimeType}` };
     }
 
-    // Reject url field on FileBlock — Claude API document type does not support url
-    if (block.url !== undefined) {
-      return {
-        valid: false,
-        error: `FileBlock url is not supported by Claude API, use data or mediaId`,
-      };
+    return this._validateSourceFields(block.data, block.url, block.mediaId, 'file');
+  }
+
+  /**
+   * Validates that exactly one of data/url/mediaId is present, and that
+   * whichever is present is valid.
+   */
+  private _validateSourceFields(
+    data: string | undefined,
+    url: string | undefined,
+    mediaId: string | undefined,
+    blockType: 'image' | 'file',
+  ): ValidationResult {
+    const presentCount = [data, url, mediaId].filter((v) => v !== undefined).length;
+
+    if (presentCount === 0) {
+      return { valid: false, error: `ContentBlock must have exactly one of data, url, or mediaId` };
     }
 
-    if (block.data !== undefined) {
-      if (!this.isValidBase64(block.data)) {
-        return { valid: false, error: `Invalid base64 data in file block` };
+    if (presentCount > 1) {
+      return { valid: false, error: `ContentBlock must have exactly one of data, url, or mediaId` };
+    }
+
+    if (data !== undefined) {
+      if (!this.isValidBase64(data)) {
+        return { valid: false, error: `Invalid base64 data in ${blockType} block` };
       }
       return { valid: true };
     }
 
-    if (block.mediaId !== undefined) {
+    if (url !== undefined) {
+      if (!this.isValidHttpUrl(url)) {
+        return { valid: false, error: `Invalid URL in ${blockType} block` };
+      }
       return { valid: true };
     }
 
-    return { valid: false, error: `ContentBlock must have either data or url` };
+    // mediaId present
+    return { valid: true };
   }
 }

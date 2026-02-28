@@ -28,6 +28,7 @@ export interface MCPToolDefinition {
     type?: string;
     properties?: Record<string, unknown>;
     required?: string[];
+    additionalProperties?: boolean;
   };
 }
 

@@ -16,6 +16,7 @@ export interface ToolDefinition {
     type: 'object';
     properties: Record<string, JSONSchemaProperty>;
     required?: string[];
+    additionalProperties?: boolean;
   };
 }
 

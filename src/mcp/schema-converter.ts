@@ -22,6 +22,9 @@ export class SchemaConverter {
         type: 'object',
         properties: (schema.properties ?? {}) as Record<string, never>,
         required: schema.required,
+        ...(schema.additionalProperties !== undefined
+          ? { additionalProperties: schema.additionalProperties }
+          : {}),
       },
     };
   }

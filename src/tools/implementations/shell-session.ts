@@ -10,6 +10,8 @@ export interface ShellSession {
 
 export class ShellSessionManager {
   private sessions = new Map<string, ShellSession>();
+  // Per-session mutex: each entry is a promise chain for serializing commands
+  private executionQueues = new Map<string, Promise<string>>();
 
   getOrCreate(sessionId: string): ShellSession {
     const existing = this.sessions.get(sessionId);
@@ -43,8 +45,17 @@ export class ShellSessionManager {
   }
 
   async execute(sessionId: string, command: string, timeoutMs: number): Promise<string> {
+    // Serialize commands per session to prevent stdout/stderr interleaving
+    const prev = this.executionQueues.get(sessionId) ?? Promise.resolve('');
+    const next = prev.then(() => this._executeOne(sessionId, command, timeoutMs));
+    // Store the chain but don't let rejections propagate to the queue itself
+    this.executionQueues.set(sessionId, next.catch(() => ''));
+    return next;
+  }
+
+  private _executeOne(sessionId: string, command: string, timeoutMs: number): Promise<string> {
     // Transparently restart if shell died
-    let session = this.getOrCreate(sessionId);
+    const session = this.getOrCreate(sessionId);
 
     const sentinel = `__KIRO_DONE_${randomUUID()}__`;
     const input = `${command}\necho '${sentinel}'\n`;
@@ -58,6 +69,7 @@ export class ShellSessionManager {
       const cleanup = () => {
         proc.stdout?.removeListener('data', onStdout);
         proc.stderr?.removeListener('data', onStderr);
+        proc.removeListener('exit', onExit);
         clearTimeout(timer);
       };
 
@@ -95,15 +107,12 @@ export class ShellSessionManager {
         stderrBuffer += chunk.toString();
       };
 
+      const onExit = () => {
+        settle(stdoutBuffer.trim() || stderrBuffer.trim() || '(process exited)');
+      };
+
       proc.stdout?.on('data', onStdout);
       proc.stderr?.on('data', onStderr);
-
-      // Handle process exit before sentinel arrives
-      const onExit = () => {
-        if (!settled) {
-          settle(stdoutBuffer.trim() || stderrBuffer.trim() || '(process exited)');
-        }
-      };
       proc.once('exit', onExit);
 
       try {
@@ -118,6 +127,7 @@ export class ShellSessionManager {
     const session = this.sessions.get(sessionId);
     if (session) {
       this.sessions.delete(sessionId);
+      this.executionQueues.delete(sessionId);
       try {
         session.process.kill();
       } catch {
@@ -127,7 +137,7 @@ export class ShellSessionManager {
   }
 
   destroyAll(): void {
-    for (const sessionId of this.sessions.keys()) {
+    for (const sessionId of [...this.sessions.keys()]) {
       this.destroy(sessionId);
     }
   }

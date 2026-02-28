@@ -29,6 +29,9 @@ export class MCPManager {
   // Server configs kept for reconnect (need toolNamespace setting)
   private readonly serverConfigs = new Map<string, MCPServerConfig>();
 
+  // Track which tool names belong to each server for cleanup on reconnect
+  private readonly serverToolNames = new Map<string, string[]>();
+
   private toolCallTimeoutMs = 30000;
   private isShuttingDown = false;
 
@@ -167,24 +170,54 @@ export class MCPManager {
 
   /**
    * Discover tools from a connected client and register/overwrite them in ToolRegistry.
-   * Re-registration overwrites existing entries (ToolRegistry.register uses Map.set).
+   * Removes tools from the previous registration that are no longer present on the server.
    */
   private async discoverAndRegisterTools(serverName: string, client: MCPClient): Promise<void> {
     const server = this.serverConfigs.get(serverName);
     const useNamespace = server ? server.toolNamespace !== false : true;
 
     const tools = await client.listTools();
+    const newToolNames: string[] = [];
 
     for (const tool of tools) {
       const definition = SchemaConverter.toToolDefinition(serverName, tool, useNamespace);
       const bridgeTool = new MCPBridgeTool(client, tool.name, definition, this.toolCallTimeoutMs);
       this.toolRegistry.register(bridgeTool);
+      newToolNames.push(definition.name);
 
-      // Track registered tool names (avoid duplicates on re-registration)
+      // Track in the global list (avoid duplicates on re-registration)
       if (!this.registeredTools.includes(definition.name)) {
         this.registeredTools.push(definition.name);
       }
     }
+
+    // Remove tools that were registered previously but are no longer present
+    const prevToolNames = this.serverToolNames.get(serverName) ?? [];
+    for (const oldName of prevToolNames) {
+      if (!newToolNames.includes(oldName)) {
+        // Unregister from ToolRegistry by replacing with a stub that returns an error
+        this.toolRegistry.register({
+          definition: {
+            name: oldName,
+            description: '',
+            parameters: { type: 'object', properties: {} },
+          },
+          execute: async () => ({
+            toolCallId: '',
+            content: `Tool ${oldName} is no longer available (MCP server reconnected with fewer tools)`,
+            isError: true,
+          }),
+        });
+        // Remove from global tracking list
+        const idx = this.registeredTools.indexOf(oldName);
+        if (idx !== -1) {
+          this.registeredTools.splice(idx, 1);
+        }
+      }
+    }
+
+    // Update the per-server tool name snapshot
+    this.serverToolNames.set(serverName, newToolNames);
   }
 
   private createClient(server: MCPServerConfig, connectTimeoutMs: number): MCPClient {

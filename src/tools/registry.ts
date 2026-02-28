@@ -65,9 +65,8 @@ export class ToolRegistry {
 
     const argsObj = args as Record<string, unknown>;
 
-    // Reject unknown top-level keys — the top-level parameters schema should
-    // only contain declared properties (P1-6 fix).
-    if (schema.properties) {
+    // Reject unknown top-level keys unless the schema explicitly allows them
+    if (schema.properties && schema.additionalProperties !== true) {
       for (const key of Object.keys(argsObj)) {
         if (!(key in schema.properties)) {
           errors.push(`Unknown argument: ${key}`);

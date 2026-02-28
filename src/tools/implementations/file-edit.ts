@@ -49,7 +49,7 @@ export function createFileEditTool(workDir: string, lintRunner?: LintRunner, con
             description: 'Content to insert, required for insert operation',
           },
         },
-        required: ['path', 'old_text', 'new_text'],
+        required: ['path'],
       },
     },
     async execute(args: Record<string, unknown>): Promise<ToolResult> {
