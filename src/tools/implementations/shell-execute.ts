@@ -1,5 +1,6 @@
 import { execSync } from 'child_process';
 import type { Tool, ToolResult } from '../../types/tools.js';
+import type { ShellSessionManager } from './shell-session.js';
 
 export interface ShellConfirmFn {
   (command: string): Promise<boolean>;
@@ -14,7 +15,9 @@ const denyConfirm: ShellConfirmFn = async () => false;
 
 export function createShellExecuteTool(
   workDir: string,
-  confirm: ShellConfirmFn = denyConfirm
+  confirm: ShellConfirmFn = denyConfirm,
+  shellSessionManager?: ShellSessionManager,
+  sessionId?: string
 ): Tool {
   return {
     definition: {
@@ -43,11 +46,22 @@ export function createShellExecuteTool(
       if (!confirmed) {
         return {
           toolCallId: '',
-          content: `[cancelled] Command execution was not confirmed: ${command}`,
+          content: `[cancelled] Command execution was not confirmed`,
           isError: true,
         };
       }
 
+      // Persistent shell mode
+      if (shellSessionManager && sessionId) {
+        const output = await shellSessionManager.execute(sessionId, command, timeoutMs);
+        return {
+          toolCallId: '',
+          content: output,
+          isError: false,
+        };
+      }
+
+      // Fallback: execSync (backward compatible)
       try {
         const output = execSync(command, {
           cwd: workDir,

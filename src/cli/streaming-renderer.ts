@@ -1,15 +1,33 @@
 /**
  * StreamingRenderer — renders LLM stream output to the terminal.
- * Validates: Requirements 1.3, 1.6
+ * Validates: Requirements 1.3, 1.6, 4.1, 5.1
  */
+import { MarkdownStreamRenderer, MarkdownRenderOptions } from '../context/markdown-renderer.js';
+
 export class StreamingRenderer {
   private terminalWidth = 80;
+  private mdRenderer: MarkdownStreamRenderer;
+
+  constructor(options?: MarkdownRenderOptions) {
+    this.mdRenderer = new MarkdownStreamRenderer(options);
+  }
 
   /**
-   * Write a single token directly to stdout (no newline).
+   * Write a single token through the Markdown stream renderer.
    */
   renderToken(token: string): void {
-    process.stdout.write(token);
+    const rendered = this.mdRenderer.push(token);
+    if (rendered) process.stdout.write(rendered);
+  }
+
+  /**
+   * Flush remaining buffered Markdown content and reset renderer state.
+   * Call at the end of each message.
+   */
+  flushMarkdown(): void {
+    const remaining = this.mdRenderer.flush();
+    if (remaining) process.stdout.write(remaining);
+    this.mdRenderer.reset();
   }
 
   /**

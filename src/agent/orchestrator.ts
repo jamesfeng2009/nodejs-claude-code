@@ -1,3 +1,4 @@
+import { readFile } from 'fs/promises';
 import type { LLMClient, StreamChunk } from '../llm/client.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { ContextManager } from '../context/context-manager.js';
@@ -5,10 +6,59 @@ import type { ConversationManager } from '../conversation/manager.js';
 import type { SubAgentManager } from './sub-agent-manager.js';
 import type { ContentBlock, Message } from '../types/messages.js';
 import type { ToolCall } from '../types/tools.js';
+import { loadMemoryFiles, formatMemorySection } from '../context/memory-loader.js';
+import { TokenTracker } from '../session/token-tracker.js';
+import { isFileContentReference, type FileContentReference } from '../types/context.js';
+import { PermissionChecker } from '../context/permission-checker.js';
+
+/**
+ * Expand FileContentReference placeholders in tool messages to actual file content.
+ * Creates a shallow copy of messages — does NOT mutate the originals.
+ * Requirements: 6.2, 6.3, 6.4
+ */
+async function expandFileReferences(messages: Message[]): Promise<Message[]> {
+  const expanded: Message[] = [];
+  for (const msg of messages) {
+    if (msg.role === 'tool' && typeof msg.content === 'string') {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(msg.content);
+      } catch {
+        expanded.push(msg);
+        continue;
+      }
+
+      if (isFileContentReference(parsed)) {
+        const ref = parsed as FileContentReference;
+        let fileContent: string;
+        try {
+          fileContent = await readFile(ref.filePath, 'utf-8');
+        } catch (err: unknown) {
+          const nodeErr = err as NodeJS.ErrnoException;
+          if (nodeErr.code === 'ENOENT') {
+            fileContent = `文件已不存在: ${ref.filePath}`;
+          } else {
+            fileContent = `无法读取文件: ${ref.filePath}: ${nodeErr.message ?? String(err)}`;
+          }
+        }
+        expanded.push({ ...msg, content: fileContent });
+        continue;
+      }
+    }
+    expanded.push(msg);
+  }
+  return expanded;
+}
 
 export class OrchestratorAgent {
   /** Cached project context — collected once per session, not per message */
   private projectContextPromise: ReturnType<ContextManager['collectProjectContext']> | null = null;
+
+  /** Token usage tracker — exposed for REPL /cost command (Requirements 3.2, 3.3) */
+  readonly tokenTracker: TokenTracker;
+
+  /** Permission checker — loaded once per session start (Requirements 10.1, 10.5) */
+  private readonly permissionChecker: PermissionChecker | null;
 
   constructor(
     private readonly llmClient: LLMClient,
@@ -16,7 +66,12 @@ export class OrchestratorAgent {
     private readonly contextManager: ContextManager,
     private readonly conversationManager: ConversationManager,
     private readonly subAgentManager?: SubAgentManager,
-  ) {}
+    tokenTracker?: TokenTracker,
+    workDir?: string,
+  ) {
+    this.tokenTracker = tokenTracker ?? new TokenTracker();
+    this.permissionChecker = workDir ? new PermissionChecker(workDir) : null;
+  }
 
   /**
    * Clear the conversation history.
@@ -41,6 +96,11 @@ export class OrchestratorAgent {
    * Validates: Requirements 1.2, 5.1
    */
   async *processMessage(userMessage: string | ContentBlock[]): AsyncGenerator<StreamChunk> {
+    // Load permission config at session start (Requirements 10.1, 10.5)
+    if (this.permissionChecker) {
+      await this.permissionChecker.load();
+    }
+
     // Add user message to conversation history
     this.conversationManager.addMessage({
       role: 'user',
@@ -66,7 +126,11 @@ export class OrchestratorAgent {
     const relevantChunks = await this.contextManager.getRelevantContext(textForContext);
 
     // Build system prompt with project structure + relevant code context.
-    const systemPrompt = this.contextManager.buildSystemPrompt(projectContext, relevantChunks);
+    // Reload CLAUDE.md memory files on each processMessage invocation (Requirement 2.4).
+    const memoryFiles = await loadMemoryFiles(process.cwd());
+    const memorySection = formatMemorySection(memoryFiles);
+    const systemPrompt = this.contextManager.buildSystemPrompt(projectContext, relevantChunks)
+      + (memorySection ? '\n\n' + memorySection : '');
 
     // Prepend system message if not already present, or replace the existing one.
     const messages = this.conversationManager.getMessages();
@@ -111,7 +175,8 @@ export class OrchestratorAgent {
     let currentMessages = messages;
 
     while (true) {
-      const stream = this.llmClient.chat(currentMessages, toolDefinitions);
+      const expandedMessages = await expandFileReferences(currentMessages);
+      const stream = this.llmClient.chat(expandedMessages, toolDefinitions);
 
       // Collect the full assistant turn before executing tools.
       // A single LLM response may contain multiple tool calls; we must
@@ -159,15 +224,50 @@ export class OrchestratorAgent {
       // Execute all tool calls and append their results to history.
       // Requirements 3.10: each result is a role="tool" message with the matching toolCallId.
       for (const toolCall of pendingToolCalls) {
+        // Permission check before tool execution (Requirements 10.1, 10.5, 11.1–11.6)
+        if (this.permissionChecker) {
+          const permResult = this.permissionChecker.check(
+            toolCall.name,
+            toolCall.arguments as Record<string, unknown>,
+          );
+          if (!permResult.allowed) {
+            const deniedMsg: Message = {
+              role: 'tool',
+              content: `Permission denied: ${permResult.reason}`,
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              timestamp: Date.now(),
+            };
+            this.conversationManager.addMessage(deniedMsg);
+            currentMessages.push(deniedMsg);
+            continue;
+          }
+        }
+
         const toolResult = await this.toolRegistry.execute(toolCall);
-        // Compress large tool outputs before storing in conversation history (P0-3 fix).
-        const compressedContent = this.contextManager.compressToolOutput(
-          toolResult.content,
-          toolCall.name,
-        );
+
+        let storedContent: string;
+        if (toolCall.name === 'file_read') {
+          // Store a FileContentReference placeholder instead of raw file content.
+          // The actual content will be re-read from disk via expandFileReferences
+          // before each LLM call. Requirements: 6.1, 6.4
+          const ref: FileContentReference = {
+            __type: 'file_content_reference',
+            filePath: toolCall.arguments['path'] as string,
+            readAtMtime: Date.now(),
+          };
+          storedContent = JSON.stringify(ref);
+        } else {
+          // Compress large tool outputs before storing in conversation history (P0-3 fix).
+          storedContent = this.contextManager.compressToolOutput(
+            toolResult.content,
+            toolCall.name,
+          );
+        }
+
         const toolResultMsg: Message = {
           role: 'tool',
-          content: compressedContent,
+          content: storedContent,
           toolCallId: toolResult.toolCallId,
           name: toolCall.name,
           timestamp: Date.now(),

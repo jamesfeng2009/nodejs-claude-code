@@ -1,6 +1,7 @@
 import type { Message, ContentBlock, ImageBlock, FileBlock } from '../types/messages.js';
 import type { ToolDefinition, ToolCall } from '../types/tools.js';
 import type { MediaStore } from '../media/media-store.js';
+import type { TokenTracker } from '../session/token-tracker.js';
 
 export interface LLMClientConfig {
   apiKey: string;
@@ -87,15 +88,22 @@ interface OpenAIStreamChunk {
     delta: OpenAIDelta;
     finish_reason: string | null;
   }>;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
 }
 
 export class LLMClient {
   private config: LLMClientConfig;
   private mediaStore?: MediaStore;
+  private tokenTracker?: TokenTracker;
 
-  constructor(config: LLMClientConfig, mediaStore?: MediaStore) {
+  constructor(config: LLMClientConfig, mediaStore?: MediaStore, tokenTracker?: TokenTracker) {
     this.config = config;
     this.mediaStore = mediaStore;
+    this.tokenTracker = tokenTracker;
   }
 
   /**
@@ -311,6 +319,9 @@ export class LLMClient {
       { id: string; name: string; argsBuffer: string }
     >();
 
+    // Track whether usage was recorded for this stream
+    let usageRecorded = false;
+
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -337,6 +348,9 @@ export class LLMClient {
           const data = trimmed.slice(6); // Remove "data: " prefix
 
           if (data === '[DONE]') {
+            if (!usageRecorded && this.tokenTracker) {
+              console.warn('[TokenTracker] No usage field found in SSE stream; token counts not recorded.');
+            }
             yield { type: 'done' };
             return;
           }
@@ -347,6 +361,16 @@ export class LLMClient {
           } catch {
             // Skip malformed JSON
             continue;
+          }
+
+          // Detect usage field (some providers attach it to the final chunk)
+          if (parsed.usage && this.tokenTracker) {
+            this.tokenTracker.record(
+              this.config.model,
+              parsed.usage.prompt_tokens,
+              parsed.usage.completion_tokens,
+            );
+            usageRecorded = true;
           }
 
           for (const choice of parsed.choices) {
@@ -426,6 +450,11 @@ export class LLMClient {
             }
           }
         }
+      }
+
+      // Stream ended without [DONE] — warn if usage was never recorded
+      if (!usageRecorded && this.tokenTracker) {
+        console.warn('[TokenTracker] No usage field found in SSE stream; token counts not recorded.');
       }
     } finally {
       reader.releaseLock();

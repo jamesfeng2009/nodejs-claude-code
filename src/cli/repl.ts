@@ -5,6 +5,14 @@ import type { OrchestratorAgent } from '../agent/orchestrator.js';
 import type { StreamingRenderer } from './streaming-renderer.js';
 import type { ShellConfirmFn } from '../tools/implementations/shell-execute.js';
 import type { ContentBlock, SupportedImageMimeType, SupportedFileMimeType } from '../types/messages.js';
+import type { TokenTracker } from '../session/token-tracker.js';
+import type { ConversationManager } from '../conversation/manager.js';
+import {
+  createDefaultRegistry,
+  SlashCommandRegistry,
+  type SlashCommandContext,
+  type SlashCommand,
+} from './slash-commands.js';
 
 /**
  * Interactive REPL for the CLI application.
@@ -13,6 +21,8 @@ import type { ContentBlock, SupportedImageMimeType, SupportedFileMimeType } from
 export class REPL {
   private rl: readline.Interface | null = null;
   private isShuttingDown = false;
+  private readonly commandRegistry: SlashCommandRegistry;
+  private readonly cmdContext: SlashCommandContext;
 
   /** Extension → MIME type mapping for @file syntax (Req 6.2) */
   static readonly EXT_TO_MIME: Record<string, SupportedImageMimeType | SupportedFileMimeType> = {
@@ -29,7 +39,60 @@ export class REPL {
   constructor(
     private readonly orchestrator: OrchestratorAgent,
     private readonly renderer: StreamingRenderer,
-  ) {}
+    private readonly tokenTracker?: TokenTracker,
+    conversationManager?: ConversationManager,
+    modelId?: string,
+  ) {
+    // Build the slash command registry with all built-in commands
+    this.commandRegistry = createDefaultRegistry();
+
+    // Register /cost as a SlashCommand so it appears in /help
+    const costCommand: SlashCommand = {
+      name: '/cost',
+      description: '显示当前会话的 Token 用量与估算费用',
+      execute: async () => {
+        const summary = this.tokenTracker?.getSummary() ?? {
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          formattedCost: '$0.0000',
+        };
+        console.log(`Input tokens:    ${summary.totalInputTokens}`);
+        console.log(`Output tokens:   ${summary.totalOutputTokens}`);
+        console.log(`Estimated cost:  ${summary.formattedCost}`);
+      },
+    };
+
+    // Register /clear as a SlashCommand so it appears in /help
+    const clearCommand: SlashCommand = {
+      name: '/clear',
+      description: '清除当前对话历史',
+      execute: async () => {
+        this.orchestrator.clearConversation();
+        return 'Conversation cleared.';
+      },
+    };
+
+    // Register /exit as a SlashCommand so it appears in /help
+    const exitCommand: SlashCommand = {
+      name: '/exit',
+      description: '退出 AI 助手',
+      execute: async () => {
+        await this.shutdown();
+      },
+    };
+
+    this.commandRegistry.register(costCommand);
+    this.commandRegistry.register(clearCommand);
+    this.commandRegistry.register(exitCommand);
+
+    // Build the context passed to every command execution
+    this.cmdContext = {
+      orchestrator,
+      conversationManager: conversationManager ?? ({} as ConversationManager),
+      modelId: modelId ?? 'unknown',
+      registry: this.commandRegistry,
+    };
+  }
 
   /**
    * Returns a ShellConfirmFn that prompts the user via readline (y/n).
@@ -164,26 +227,38 @@ export class REPL {
 
   /**
    * Handle a single line of user input.
-   * - `/exit` → shutdown
-   * - `/clear` → clear conversation history
+   * - Slash commands (`/...`) → look up in registry and execute
+   * - Unknown slash commands → print error message
    * - `@/path/to/file` → parse file references and build ContentBlock[]
    * - anything else → pass to orchestrator and stream response
    */
   async handleInput(input: string): Promise<void> {
-    if (input === '/exit') {
-      await this.shutdown();
-      return;
-    }
-
-    if (input === '/clear') {
-      // Use the public clearConversation() method (P1-6 fix — no more unsafe casting)
-      this.orchestrator.clearConversation();
-      console.log('Conversation cleared.');
+    if (input === '') {
       this.rl?.prompt();
       return;
     }
 
-    if (input === '') {
+    // Handle slash commands via registry
+    if (input.startsWith('/')) {
+      const parts = input.split(' ');
+      const cmdName = parts[0] ?? input;
+      const args = parts.slice(1).join(' ');
+
+      const cmd = this.commandRegistry.find(cmdName);
+      if (cmd) {
+        try {
+          const result = await cmd.execute(args, this.cmdContext);
+          if (result) console.log(result);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.log(`命令执行失败: ${message}`);
+        }
+        this.rl?.prompt();
+        return;
+      }
+
+      // Unknown slash command
+      console.log(`未知命令: ${cmdName}，输入 /help 查看可用命令。`);
       this.rl?.prompt();
       return;
     }

@@ -1,5 +1,6 @@
 import type { Message, ContentBlock } from '../types/messages.js';
 import type { KeyEntityCache } from '../context/key-entity-cache.js';
+import type { LLMClient } from '../llm/client.js';
 
 export interface ConversationConfig {
   /** Token count that triggers compression (e.g. 0.8 * maxContextTokens) */
@@ -8,6 +9,12 @@ export interface ConversationConfig {
   lowWaterMark: number;
   /** LLM context window size in tokens */
   maxContextTokens: number;
+  /**
+   * Model identifier used for compression calls.
+   * Defaults to 'claude-haiku' when not specified.
+   * Requirements: 7.2
+   */
+  compressionModel?: string;
 }
 
 export interface StructuredSummary {
@@ -33,6 +40,12 @@ export class ConversationManager {
   constructor(
     private readonly config: ConversationConfig,
     private readonly entityCache: KeyEntityCache,
+    /**
+     * Optional LLM client used for compression. When provided, compression
+     * calls use this client instead of the primary LLM client.
+     * Requirements: 7.1, 7.2
+     */
+    private readonly compressionLlmClient?: LLMClient,
   ) {}
 
   addMessage(message: Message): void {
@@ -59,9 +72,16 @@ export class ConversationManager {
    * Compression reduces token count from highWaterMark to lowWaterMark.
    * Applies differentiated compression: compressible tool results are summarised
    * before the sliding-window pass, reducing token pressure (req 4.15).
+   *
+   * @param force - When true, compress regardless of the current token count.
+   *   Used by the /compact slash command. Requirements: 3.1
+   *
+   * When compressionLlmClient is provided, uses it to generate the summary via
+   * the LLM. Falls back to a local structured summary if the LLM call fails or
+   * if no client is provided. Requirements: 7.1, 7.2, 7.3, 7.4
    */
-  async compressIfNeeded(): Promise<void> {
-    if (this.getTokenCount() < this.config.highWaterMark) {
+  async compressIfNeeded(force = false): Promise<void> {
+    if (!force && this.getTokenCount() < this.config.highWaterMark) {
       return;
     }
 
@@ -101,9 +121,11 @@ export class ConversationManager {
       };
     });
 
-    // Build a compact summary of ALL non-system messages
-    const summary = this.generateStructuredSummary(nonSystemMessages);
-    const summaryMessage = this.buildSummaryMessage(summary);
+    // Build a compact summary of ALL non-system messages.
+    // When a compressionLlmClient is available, use it to generate an LLM-based
+    // summary (Requirements 7.1, 7.2). Otherwise fall back to the local structured
+    // summary generator.
+    let summaryMessage = await this.generateSummaryMessage(nonSystemMessages);
 
     // Find turn boundaries (each turn starts at a user message)
     const turnStarts: number[] = [];
@@ -285,6 +307,85 @@ export class ConversationManager {
       content: parts.join('\n'),
       timestamp: Date.now(),
     };
+  }
+
+  /**
+   * Generate a summary Message for the given messages.
+   *
+   * When `compressionLlmClient` is set, calls the LLM to produce a natural-language
+   * summary. Token usage is recorded under the compression model identifier via
+   * the `compressionLlmClient`'s internal `TokenTracker` (Requirements 7.4).
+   *
+   * If the LLM call fails with an "unrecognized model" error, falls back to the
+   * local structured summary and appends the warning
+   * `[警告: 压缩模型不可用，已退回主模型]` (Requirement 7.3).
+   *
+   * When no `compressionLlmClient` is provided, uses the local structured summary.
+   */
+  private async generateSummaryMessage(messages: Message[]): Promise<Message> {
+    if (!this.compressionLlmClient) {
+      // No compression client — use local structured summary
+      const summary = this.generateStructuredSummary(messages);
+      return this.buildSummaryMessage(summary);
+    }
+
+    // Build a prompt asking the LLM to summarise the conversation
+    const historyText = messages
+      .map((m) => {
+        const role = m.role;
+        const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        return `[${role}]: ${content}`;
+      })
+      .join('\n\n');
+
+    const promptMessages: Message[] = [
+      {
+        role: 'user',
+        content: `Please summarise the following conversation history concisely, preserving key decisions, file paths, errors, and operations performed:\n\n${historyText}`,
+        timestamp: Date.now(),
+      },
+    ];
+
+    try {
+      let summaryText = '';
+
+      for await (const chunk of this.compressionLlmClient.chat(promptMessages, [])) {
+        if (chunk.type === 'text' && chunk.content) {
+          summaryText += chunk.content;
+        }
+      }
+
+      return {
+        role: 'system',
+        content: `[Conversation Summary]\n${summaryText}`,
+        timestamp: Date.now(),
+      };
+    } catch (err: unknown) {
+      // Check if the error indicates an unrecognized model (Requirement 7.3)
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isUnrecognizedModel =
+        errMsg.toLowerCase().includes('model') &&
+        (errMsg.toLowerCase().includes('not found') ||
+          errMsg.toLowerCase().includes('unknown') ||
+          errMsg.toLowerCase().includes('invalid') ||
+          errMsg.toLowerCase().includes('unrecognized') ||
+          errMsg.toLowerCase().includes('does not exist'));
+
+      // Fall back to local structured summary
+      const summary = this.generateStructuredSummary(messages);
+      const fallbackMsg = this.buildSummaryMessage(summary);
+
+      if (isUnrecognizedModel) {
+        // Append warning indicating fallback occurred (Requirement 7.3)
+        return {
+          ...fallbackMsg,
+          content: fallbackMsg.content + '\n[警告: 压缩模型不可用，已退回主模型]',
+        };
+      }
+
+      // Other errors: fall back silently
+      return fallbackMsg;
+    }
   }
 }
 

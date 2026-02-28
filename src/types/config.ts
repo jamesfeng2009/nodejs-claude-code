@@ -17,6 +17,8 @@ export interface AppConfig {
     highWaterMark: number;
     lowWaterMark: number;
     maxContextTokens: number;
+    /** Optional model identifier for compression calls (default: 'claude-haiku-20240307') */
+    compressionModel?: string;
   };
   retriever: {
     vectorWeight: number;

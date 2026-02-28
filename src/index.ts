@@ -29,11 +29,16 @@ import { createFileReadTool } from './tools/implementations/file-read.js';
 import { createFileWriteTool } from './tools/implementations/file-write.js';
 import { createFileEditTool } from './tools/implementations/file-edit.js';
 import { createShellExecuteTool } from './tools/implementations/shell-execute.js';
+import { ShellSessionManager } from './tools/implementations/shell-session.js';
 import { createGrepSearchTool } from './tools/implementations/grep-search.js';
+import { createGlobSearchTool } from './tools/implementations/glob-search.js';
 import { createListDirectoryTool } from './tools/implementations/list-directory.js';
 import { StreamingRenderer } from './cli/streaming-renderer.js';
 import { REPL } from './cli/repl.js';
 import { MCPManager } from './mcp/manager.js';
+import { TokenTracker } from './session/token-tracker.js';
+import { LintRunner } from './tools/implementations/lint-runner.js';
+import { TransactionManager } from './tools/implementations/transaction-manager.js';
 
 async function main(): Promise<void> {
   const workDir = process.cwd();
@@ -53,22 +58,29 @@ async function main(): Promise<void> {
   }
 
   // ── Core LLM client ──────────────────────────────────────────────────────
-  const llmClient = new LLMClient({
-    apiKey: config.llm.apiKey,
-    baseUrl: config.llm.baseUrl,
-    model: config.llm.model,
-    maxTokens: config.llm.maxTokens,
-    temperature: config.llm.temperature,
-  });
+  const tokenTracker = new TokenTracker();
+  const llmClient = new LLMClient(
+    {
+      apiKey: config.llm.apiKey,
+      baseUrl: config.llm.baseUrl,
+      model: config.llm.model,
+      maxTokens: config.llm.maxTokens,
+      temperature: config.llm.temperature,
+    },
+    undefined,
+    tokenTracker,
+  );
 
   // ── Tool registry + built-in tools ───────────────────────────────────────
+  const lintRunner = new LintRunner(workDir);
+  const transactionManager = new TransactionManager();
   const toolRegistry = new ToolRegistry();
   toolRegistry.register(createFileReadTool(workDir));
-  toolRegistry.register(createFileWriteTool(workDir));
-  toolRegistry.register(createFileEditTool(workDir));
+  // file_write and file_edit are registered after contextManager is created (below)
   // shell_execute is registered later: in CLI mode with a REPL confirm fn,
   // in HTTP mode with the default deny confirm (no interactive UI available).
   toolRegistry.register(createGrepSearchTool(workDir));
+  toolRegistry.register(createGlobSearchTool(workDir));
   toolRegistry.register(createListDirectoryTool(workDir));
 
   // ── MCP integration ───────────────────────────────────────────────────────
@@ -102,16 +114,38 @@ async function main(): Promise<void> {
     toolOutputMaxLines: config.context.toolOutputMaxLines,
   });
 
+  // Register file write/edit tools now that contextManager and transactionManager are available
+  toolRegistry.register(createFileWriteTool(workDir, lintRunner, contextManager, transactionManager));
+  toolRegistry.register(createFileEditTool(workDir, lintRunner, contextManager, transactionManager));
+
   // Conversation config: highWaterMark / lowWaterMark are fractions in config,
   // convert to absolute token counts.
   const maxTokens = config.conversation.maxContextTokens;
+
+  // Create a separate LLM client for conversation compression (Requirements 7.1, 7.2).
+  // Uses a cheaper model (default: claude-haiku) to reduce compression costs.
+  const compressionModelId = config.conversation.compressionModel ?? 'claude-haiku-20240307';
+  const compressionLlmClient = new LLMClient(
+    {
+      apiKey: config.llm.apiKey,
+      baseUrl: config.llm.baseUrl,
+      model: compressionModelId,
+      maxTokens: 4096,
+      temperature: 0.3,
+    },
+    undefined,
+    tokenTracker,
+  );
+
   const conversationManager = new ConversationManager(
     {
       highWaterMark: Math.floor(config.conversation.highWaterMark * maxTokens),
       lowWaterMark: Math.floor(config.conversation.lowWaterMark * maxTokens),
       maxContextTokens: maxTokens,
+      compressionModel: compressionModelId,
     },
     keyEntityCache,
+    compressionLlmClient,
   );
 
   // ── Agent layer ───────────────────────────────────────────────────────────
@@ -122,7 +156,12 @@ async function main(): Promise<void> {
     contextManager,
     conversationManager,
     subAgentManager,
+    tokenTracker,
+    workDir,
   );
+
+  // ── Shell session manager (process-level singleton) ───────────────────────
+  const shellSessionManager = new ShellSessionManager();
 
   // ── Session store ─────────────────────────────────────────────────────────
   const sessionStore = new SessionStore(workDir, {
@@ -135,7 +174,7 @@ async function main(): Promise<void> {
   if (httpMode) {
     // ── HTTP API Server mode (P1-9 fix) ──────────────────────────────────
     // In HTTP mode there is no interactive UI, so shell commands are denied by default.
-    toolRegistry.register(createShellExecuteTool(workDir));
+    toolRegistry.register(createShellExecuteTool(workDir, undefined, shellSessionManager));
     const runManager = new RunManager();
     const sseManager = new SSEStreamManager();
     const snapshotManager = new StateSnapshotManager(sessionStore, runManager, sseManager);
@@ -161,10 +200,12 @@ async function main(): Promise<void> {
       idempotencyStore,
       orchestrator,
       sseManager,  // shared instance — same one used by StateSnapshotManager
+      onSessionDelete: (sessionId) => shellSessionManager.destroy(sessionId),
     });
 
     // Register shutdown handlers before starting the server
     const shutdown = async () => {
+      shellSessionManager.destroyAll();
       await mcpManager.shutdown();
       await server.stop();
       process.exit(0);
@@ -177,13 +218,21 @@ async function main(): Promise<void> {
   } else {
     // ── CLI REPL mode ─────────────────────────────────────────────────────
     const renderer = new StreamingRenderer();
-    const repl = new REPL(orchestrator, renderer);
+    const repl = new REPL(orchestrator, renderer, tokenTracker);
 
     // Wire up shell confirmation so the LLM can execute shell commands in CLI mode.
     // The confirm fn prompts the user inline via readline (y/N).
-    toolRegistry.register(createShellExecuteTool(workDir, repl.createShellConfirmFn()));
+    toolRegistry.register(createShellExecuteTool(workDir, repl.createShellConfirmFn(), shellSessionManager, 'cli'));
+
+    const cliShutdown = () => {
+      shellSessionManager.destroyAll();
+    };
+    process.once('SIGINT', cliShutdown);
+    process.once('SIGTERM', cliShutdown);
 
     await repl.start();
+    shellSessionManager.destroyAll();
+    await transactionManager.cleanupOpenTransactions();
     await mcpManager.shutdown();
     process.exit(0);
   }

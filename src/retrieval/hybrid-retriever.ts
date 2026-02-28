@@ -39,6 +39,42 @@ export class HybridRetriever {
   }
 
   /**
+   * Remove all indexed chunks for a given file path from both the vector store
+   * and the BM25 index.
+   */
+  async removeChunksByFile(filePath: string): Promise<void> {
+    const allChunks = this.vectorStore.getAllChunks();
+    const ids = allChunks
+      .filter((c) => c.metadata.filePath === filePath)
+      .map((c) => c.id);
+    if (ids.length > 0) {
+      await this.vectorStore.delete(ids);
+      this.bm25Index.removeDocuments(ids);
+    }
+  }
+
+  /**
+   * Embed and index a set of chunks into both the vector store and BM25 index.
+   */
+  async indexChunks(chunks: Chunk[]): Promise<void> {
+    if (chunks.length === 0) return;
+    const embeddingMap = await this.embeddingEngine.embedBatch(chunks);
+    const toUpsert: Chunk[] = [];
+    const embeddings: number[][] = [];
+    for (const chunk of chunks) {
+      const emb = embeddingMap.get(chunk.id);
+      if (emb) {
+        toUpsert.push(chunk);
+        embeddings.push(emb);
+      }
+    }
+    if (toUpsert.length > 0) {
+      await this.vectorStore.upsert(toUpsert, embeddings);
+      this.bm25Index.addDocuments(toUpsert);
+    }
+  }
+
+  /**
    * Perform hybrid retrieval:
    * 1. Vector similarity search
    * 2. BM25 keyword search

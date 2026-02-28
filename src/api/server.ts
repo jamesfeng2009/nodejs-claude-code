@@ -23,6 +23,8 @@ export interface ServerOptions {
   orchestrator: OrchestratorAgent;
   /** Shared SSEStreamManager instance — must be the same one passed to StateSnapshotManager */
   sseManager: SSEStreamManager;
+  /** Optional hook called when a session is deleted (e.g. to clean up shell sessions) */
+  onSessionDelete?: (sessionId: string) => void;
 }
 
 /**
@@ -112,6 +114,7 @@ export class HTTPAPIServer {
       async (request, reply) => {
         try {
           await sessionStore.delete(request.params.sessionId);
+          this.options.onSessionDelete?.(request.params.sessionId);
           return reply.code(204).send();
         } catch {
           return reply.code(404).send({ error: 'Not Found', message: 'Session not found' });

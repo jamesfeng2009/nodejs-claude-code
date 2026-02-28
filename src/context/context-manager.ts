@@ -4,6 +4,7 @@ import type { ProjectContext, ConfigFileInfo } from '../types/context.js';
 import type { HybridRetriever } from '../retrieval/hybrid-retriever.js';
 import type { ScoredChunk } from '../retrieval/vector-store.js';
 import type { KeyEntityCache } from './key-entity-cache.js';
+import { CodeChunker } from './code-chunker.js';
 
 export interface ContextConfig {
   maxChunkSize: number;
@@ -36,11 +37,18 @@ const CONFIG_FILE_NAMES = [
  * system prompt assembly, and tool output compression.
  */
 export class ContextManager {
+  private readonly chunker: CodeChunker;
+
   constructor(
     private readonly retriever: HybridRetriever,
     private readonly entityCache: KeyEntityCache,
     private readonly config: ContextConfig
-  ) {}
+  ) {
+    this.chunker = new CodeChunker({
+      maxChunkSize: config.maxChunkSize,
+      overlapLines: config.overlapLines,
+    });
+  }
 
   /**
    * Collect project structure info from workDir, respecting .gitignore rules.
@@ -74,6 +82,40 @@ export class ContextManager {
     // Sort by score descending (highest relevance first)
     priorities.sort((a, b) => b.score - a.score);
     return priorities;
+  }
+
+  /**
+   * Invalidate all Code_Chunk_Index entries for the given file path and
+   * re-index the file content.
+   *
+   * - If the file does not exist (ENOENT): remove entries only, no re-index.
+   * - If the file read fails for another reason: log warning, retain old
+   *   entries (do not remove), return without error.
+   * - Completes before returning so the next retrieval sees updated index.
+   */
+  async invalidateAndReindex(absoluteFilePath: string): Promise<void> {
+    let content: string;
+    try {
+      content = fs.readFileSync(absoluteFilePath, 'utf-8');
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        // File deleted — remove entries, no re-index
+        await this.retriever.removeChunksByFile(absoluteFilePath);
+        return;
+      }
+      // Other read failure — retain old entries, log warning
+      console.warn(
+        `[ContextManager] Failed to read file for re-indexing: ${absoluteFilePath}:`,
+        (err as Error).message
+      );
+      return;
+    }
+
+    // Remove old chunks, then re-chunk and re-index
+    await this.retriever.removeChunksByFile(absoluteFilePath);
+    const newChunks = this.chunker.chunkFile(absoluteFilePath, content);
+    await this.retriever.indexChunks(newChunks);
   }
 
   /**
